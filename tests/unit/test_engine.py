@@ -59,10 +59,19 @@ def test_probability_extremes_and_determinism() -> None:
     assert 5 < sum(seqs[0]) < 45
 
 
-def test_unsupported_mode() -> None:
+def test_unsupported_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mcp_chaos.proxy.faults import base
+
+    monkeypatch.delitem(base.CATALOG_REGISTRY, FaultMode.TOOL_VANISH)
     spec = FaultSpec(id="e", mode=FaultMode.TOOL_VANISH, params=ToolVanishParams())
     with pytest.raises(UnsupportedFaultError, match="tool_vanish"):
         FaultEngine(plan(spec), "s")
+
+
+def test_every_fault_mode_is_implemented() -> None:
+    from mcp_chaos.proxy.faults import base
+
+    assert set(FaultMode) <= set(base.REGISTRY) | set(base.CATALOG_REGISTRY)
 
 
 def test_decide_with_explicit_out_of_order_index() -> None:
