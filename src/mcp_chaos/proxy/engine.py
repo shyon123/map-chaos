@@ -7,9 +7,11 @@ import random
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
-from mcp_chaos.proxy.faults import prompt_injection as prompt_injection  # registers F08
 from mcp_chaos.proxy.faults.base import REGISTRY
+from mcp_chaos.proxy.faults.discover import load_all
 from mcp_chaos.schemas import FaultPlan, FaultSpec
+
+load_all()
 
 
 class UnsupportedFaultError(Exception):
