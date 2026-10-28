@@ -51,12 +51,15 @@ def canonical_json(obj: Any) -> bytes:
 
 
 def normalize(body: dict[str, Any], rules: Sequence[Rule] | None = None) -> bytes:
-    """Drop ``metadata``, regex-rewrite string leaves of ``system``/``messages``, canonicalize."""
+    """Drop ``metadata``, regex-rewrite string leaves of ``system`` ONLY, canonicalize.
+
+    ``messages`` (including tool_use/tool_result content) are hashed verbatim: rewriting dates or
+    paths there would let requests with different tool results share a key.
+    """
     compiled = [(re.compile(p), r) for p, r in (DEFAULT_RULES if rules is None else rules)]
     out = {k: v for k, v in body.items() if k != "metadata"}
-    for field in ("system", "messages"):
-        if field in out:
-            out[field] = _apply(out[field], compiled)
+    if "system" in out:
+        out["system"] = _apply(out["system"], compiled)
     return canonical_json(out)
 
 

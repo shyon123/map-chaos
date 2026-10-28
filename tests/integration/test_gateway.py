@@ -147,12 +147,14 @@ async def test_normalization_same_key_and_seed_differs(tmp_path: Path) -> None:
         system="You are a test agent. Today's date is 2030-02-03. Session "
         "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee."
     )
-    other["messages"][0]["content"][0]["text"] = (
-        "List files in /tmp/pytest-of-zz/pytest-1/work and note the time 2030-02-03T00:00:00Z."
-    )
     other["metadata"] = {"user_id": "zzz"}
     r = await post(client, other)
     assert r.headers["x-mcp-chaos-source"] == "cache" and len(up.calls) == 1
+    diff_tool = request_body()
+    diff_tool["messages"][0]["content"][0]["text"] += " 2030-02-03"
+    r = await post(client, diff_tool)  # message text is hashed verbatim
+    assert r.headers["x-mcp-chaos-source"] == "upstream" and len(up.calls) == 2
+    up.calls.pop()
     r = await post(client, request_body(), run="r2")
     assert r.headers["x-mcp-chaos-source"] == "upstream" and len(up.calls) == 2
     await client.aclose()
@@ -390,3 +392,137 @@ def test_key_required_outside_replay(tmp_path: Path, monkeypatch: pytest.MonkeyP
         with pytest.raises(GatewayConfigError):
             create_app(make_cfg(tmp_path, mode, None))
     create_app(make_cfg(tmp_path, "replay", None))
+
+
+class SlowUpstream(Upstream):
+    """Async upstream that holds each call open so requests overlap."""
+
+    async def __call__(self, req: httpx.Request) -> httpx.Response:  # type: ignore[override]
+        await anyio.sleep(0.05)
+        return super().__call__(req)
+
+
+def make_with(tmp_path: Path, fn: Any, **kw: Any):
+    cfg = GatewayConfig(
+        mode="live",
+        cache_dir=tmp_path / "cache",
+        cassette_dir=tmp_path / "cassettes",
+        transport=httpx.MockTransport(fn),
+        **kw,
+    )
+    app = create_app(cfg)
+    gw: Gateway = app.state.gateway
+    return gw, httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://gw")
+
+
+PER_REQ = 100_000 * 0.50 / 1e6 + 0.0002  # haiku, max_tokens=100_000, small input (upper bound)
+
+
+@pytest.mark.anyio
+async def test_concurrent_requests_reserve_worst_case(tmp_path: Path) -> None:
+    up = SlowUpstream()
+    gw, client = make_with(tmp_path, up)
+    gw.register_run("r1", seed=1, budget_usd=PER_REQ * 3.5)
+    codes: list[int] = []
+
+    async def one(i: int) -> None:
+        codes.append((await post(client, request_body(max_tokens=100_000, n=i))).status_code)
+
+    async with anyio.create_task_group() as tg:
+        for i in range(8):
+            tg.start_soon(one, i)
+    assert codes.count(200) == len(up.calls) == 3
+    assert codes.count(400) == 5
+    assert gw.budget.get_usage("r1").cost_usd <= PER_REQ * 3.5
+    assert gw.budget.reserved("r1") == 0.0 and gw.budget.global_reserved == 0.0
+    await client.aclose()
+    await gw.aclose()
+
+
+@pytest.mark.anyio
+async def test_concurrent_global_cap(tmp_path: Path) -> None:
+    up = SlowUpstream()
+    gw, client = make_with(tmp_path, up, global_budget_usd=PER_REQ * 2.5)
+    for rid in ("a", "b", "c"):
+        gw.register_run(rid, seed=1, budget_usd=10)
+    codes: list[int] = []
+
+    async def one(rid: str) -> None:
+        codes.append((await post(client, request_body(max_tokens=100_000), run=rid)).status_code)
+
+    async with anyio.create_task_group() as tg:
+        for rid in ("a", "b", "c"):
+            tg.start_soon(one, rid)
+    assert sorted(codes) == [200, 200, 400]
+    assert len(up.calls) == 2
+    await client.aclose()
+    await gw.aclose()
+
+
+@pytest.mark.anyio
+async def test_upstream_exception_settles(tmp_path: Path) -> None:
+    def timeout(req: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=req)
+
+    def refused(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no", request=req)
+
+    gw, client = make_with(tmp_path / "a", timeout)
+    gw.register_run("r1", seed=1, budget_usd=10)
+    with pytest.raises(httpx.ReadTimeout):
+        await post(client, request_body(max_tokens=1000))
+    assert gw.budget.reserved("r1") == 0.0
+    assert gw.budget.get_usage("r1").cost_usd > 0  # failed closed
+
+    gw2, client2 = make_with(tmp_path / "b", refused)
+    gw2.register_run("r1", seed=1, budget_usd=10)
+    with pytest.raises(httpx.ConnectError):
+        await post(client2, request_body(max_tokens=1000))
+    assert gw2.budget.get_usage("r1").cost_usd == 0.0
+    assert gw2.budget.reserved("r1") == 0.0
+    for c in (client, client2):
+        await c.aclose()
+    await gw.aclose()
+    await gw2.aclose()
+
+
+async def _drive_relay(gw: Gateway, chunks: list[bytes], stop_after: int | None) -> None:
+    async def body() -> AsyncIterator[bytes]:
+        for c in chunks:
+            yield c
+
+    up = httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+    res = gw.budget.reserve("r1", 0.123)
+    assert res is not None
+    gen = gw._relay(up, "r1", "k" * 64, 1, "claude-haiku-5-5", res)  # type: ignore[reportPrivateUsage]
+    n = 0
+    async for _ in gen:
+        n += 1
+        if stop_after is not None and n >= stop_after:
+            break
+    await gen.aclose()  # pyright: ignore[reportAttributeAccessIssue]
+
+
+@pytest.mark.anyio
+async def test_stream_disconnect_after_usage_seen_records_spend(tmp_path: Path) -> None:
+    gw, client = make(tmp_path, "live", Upstream())
+    gw.register_run("r1", seed=1, budget_usd=10)
+    start_only = SSE.split(b"\n\n")[0] + b"\n\n"
+    assert b"message_start" in start_only
+    await _drive_relay(gw, [start_only, SSE[len(start_only) :]], stop_after=1)
+    u = gw.budget.get_usage("r1")
+    assert u.input_tokens == 1000 and u.cost_usd > 0
+    assert gw.budget.reserved("r1") == 0.0 and gw.budget.global_reserved == 0.0
+    await client.aclose()
+    await gw.aclose()
+
+
+@pytest.mark.anyio
+async def test_stream_disconnect_before_usage_settles_worst_case(tmp_path: Path) -> None:
+    gw, client = make(tmp_path, "live", Upstream())
+    gw.register_run("r1", seed=1, budget_usd=10)
+    await _drive_relay(gw, [b"event: ping\ndata: {}\n\n", b"more"], stop_after=1)
+    assert gw.budget.get_usage("r1").cost_usd == pytest.approx(0.123)
+    assert gw.budget.reserved("r1") == 0.0 and gw.budget.global_reserved == 0.0
+    await client.aclose()
+    await gw.aclose()

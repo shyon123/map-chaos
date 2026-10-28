@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from mcp_chaos.llm.budget import BudgetTracker, TokenCounts, usage_from_body, usage_from_sse
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "llm"
@@ -54,3 +56,27 @@ def test_tracker_spend_caps_and_usage() -> None:
     assert not bt.is_aborted("a")
     bt.mark_aborted("a")
     assert bt.is_aborted("a")
+
+
+def test_reserve_settle_lifecycle() -> None:
+    bt = BudgetTracker(global_cap_usd=1.0)
+    bt.register("a", 0.5)
+    bt.register("b", 0.9)
+    r1 = bt.reserve("a", 0.3)
+    assert r1 is not None and bt.reserved("a") == 0.3
+    assert bt.reserve("a", 0.3) is None  # 0.3 held + 0.3 > 0.5
+    r2 = bt.reserve("b", 0.6)  # global: 0.3 + 0.6 <= 1.0
+    assert r2 is not None
+    assert bt.reserve("b", 0.2) is None  # global 0.9 + 0.2 > 1.0
+    t = TokenCounts()
+    bt.settle(r1, t, 0.1)
+    bt.settle(r1, t, 0.1)  # idempotent
+    assert bt.reserved("a") == 0.0 and bt.global_reserved == pytest.approx(0.6)
+    assert bt.get_usage("a").cost_usd == pytest.approx(0.1)
+    assert bt.global_spend == pytest.approx(0.1)
+    bt.settle(r2, t, 0.0)
+    r3 = bt.reserve("a", 0.375)  # 0.1 spent + 0.375 < cap
+    assert r3 is not None
+    assert bt.reserve("a", 0.05) is None
+    bt.settle(r3, t, 0.0)
+    assert bt.global_reserved == pytest.approx(0.0)

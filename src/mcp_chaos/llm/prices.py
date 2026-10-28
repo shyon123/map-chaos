@@ -87,3 +87,18 @@ def compute_cost(
         + cache_write_tokens * rates.cache_write_5m
         + cache_read_tokens * rates.cache_read
     ) / 1_000_000
+
+
+def worst_case_cost(model: str, *, est_input_tokens: int, max_tokens: int) -> float:
+    """Upper-bound cost of one request: every prompt token at the dearest input-side rate
+    (cache-write) and ``max_tokens`` output tokens, at long-context rates when they could apply."""
+    p = price_for(model)
+    rates = p.rates
+    if (
+        p.long_context_threshold is not None
+        and p.long_context_rates is not None
+        and est_input_tokens > p.long_context_threshold
+    ):
+        rates = p.long_context_rates
+    in_rate = max(rates.input, rates.cache_write_5m, rates.cache_read)
+    return (max(est_input_tokens, 0) * in_rate + max(max_tokens, 0) * rates.output) / 1_000_000

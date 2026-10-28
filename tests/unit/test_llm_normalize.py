@@ -15,59 +15,75 @@ def _req() -> dict[str, Any]:
     return json.loads((FIXTURES / "request.json").read_text())
 
 
-def test_metadata_removed_and_placeholders() -> None:
+def test_metadata_removed_and_system_placeholders() -> None:
     out = normalize(_req()).decode()
     assert "metadata" not in out
     assert "session-abc" not in out
     assert "Today's date is <DATE>" in out
     assert "<UUID>" in out
-    assert "<TMP>" in out
-    assert "2026-10-28" not in out
+    assert "Today's date is 2026-10-28" not in out
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "/private/var/folders/ab/cd/T/xyz",
-        "/tmp/abc/def.txt",  # noqa: S108
-        "/var/folders/ab/cd",
-    ],
-)
-def test_tmp_paths(text: str) -> None:
-    body = {"model": "m", "messages": [{"role": "user", "content": f"see {text} now"}]}
-    assert normalize(body).decode().count("<TMP>") == 1
+def test_messages_hashed_verbatim() -> None:
+    out = normalize(_req()).decode()
+    assert "/tmp/pytest-of-user/pytest-3/work" in out  # noqa: S108
+    assert "2026-10-28T09:15:00Z" in out
+    assert "<TMP>" not in out
 
 
-def test_differing_only_by_volatile_values_same_key() -> None:
+def test_system_text_blocks_normalized() -> None:
+    body = {
+        "model": "m",
+        "system": [{"type": "text", "text": "Today's date is 2026-01-01. cwd /tmp/abc/x"}],
+        "messages": [],
+    }
+    out = normalize(body).decode()
+    assert "<DATE>" in out and "<TMP>" in out
+
+
+def test_tool_result_date_differs_different_key() -> None:
+    def req(date: str) -> dict[str, Any]:
+        return {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t", "content": f"commit {date}"}
+                    ],
+                }
+            ],
+        }
+
+    ka = compute_key("m", normalize(req("2026-01-01")), 1)
+    kb = compute_key("m", normalize(req("2026-02-02")), 1)
+    assert ka != kb
+
+
+def test_system_date_differs_same_key() -> None:
     a = _req()
     b = _req()
     b["system"] = (
         "You are a test agent. Today's date is 2027-01-02. "
         "Session aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee."
     )
-    b["messages"][0]["content"][0]["text"] = (
-        "List files in /tmp/pytest-of-other/pytest-9/work "
-        "and note the time 2027-01-02T01:02:03+00:00."
-    )
     b["metadata"] = {"user_id": "other"}
-    ka = compute_key("m", normalize(a), 1)
-    kb = compute_key("m", normalize(b), 1)
-    assert ka == kb
-    assert compute_key("m", normalize(a), 2) != ka
-    assert compute_key("n", normalize(a), 1) != ka
+    assert compute_key("m", normalize(a), 1) == compute_key("m", normalize(b), 1)
+    assert compute_key("m", normalize(a), 2) != compute_key("m", normalize(a), 1)
+    assert compute_key("n", normalize(a), 1) != compute_key("m", normalize(a), 1)
 
 
 def test_custom_rules_and_key_order_independent() -> None:
-    a = {"model": "m", "messages": [{"role": "user", "content": "id 42"}], "max_tokens": 1}
-    b = {"max_tokens": 1, "messages": [{"role": "user", "content": "id 99"}], "model": "m"}
+    a = {"model": "m", "system": "id 42", "messages": [], "max_tokens": 1}
+    b = {"max_tokens": 1, "messages": [], "system": "id 99", "model": "m"}
     rules = [(r"\d+", "N")]
     assert normalize(a, rules) == normalize(b, rules)
     assert normalize(a) != normalize(b)
 
 
 def test_non_string_leaves_untouched() -> None:
-    body = {"model": "m", "messages": [{"role": "user", "content": [{"n": 5, "ok": True}]}]}
-    assert json.loads(normalize(body))["messages"][0]["content"][0] == {"n": 5, "ok": True}
+    body = {"model": "m", "system": [{"n": 5, "ok": True, "l": ["2026-01-01"]}]}
+    assert json.loads(normalize(body))["system"][0] == {"n": 5, "ok": True, "l": ["<DATE>"]}
 
 
 def test_parse_body_errors() -> None:

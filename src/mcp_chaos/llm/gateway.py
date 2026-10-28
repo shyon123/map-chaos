@@ -20,7 +20,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from mcp_chaos.llm.budget import BudgetTracker, TokenCounts, usage_from_body, usage_from_sse
+from mcp_chaos.llm.budget import (
+    BudgetTracker,
+    Reservation,
+    TokenCounts,
+    usage_from_body,
+    usage_from_sse,
+)
 from mcp_chaos.llm.cache import DiskCache, StoredResponse
 from mcp_chaos.llm.cassette import CassetteEntry, CassetteReader, CassetteWriter
 from mcp_chaos.llm.normalize import (
@@ -31,7 +37,7 @@ from mcp_chaos.llm.normalize import (
     normalize,
     parse_body,
 )
-from mcp_chaos.llm.prices import UnknownModelError, compute_cost, price_for
+from mcp_chaos.llm.prices import UnknownModelError, compute_cost, price_for, worst_case_cost
 from mcp_chaos.log import get_logger
 from mcp_chaos.schemas.results import Usage
 
@@ -168,17 +174,27 @@ class Gateway:
             log.info("llm_cache_hit", run_id=run_id, key=key[:12], model=model, cost_usd=0.0)
             return _replay(cached, "cache")
 
+        reservation: Reservation | None = None
         if kind == "messages":
             try:
                 price_for(model)
             except UnknownModelError:
                 return _error(400, "invalid_request_error", "mcp-chaos unknown model (no price)")
-        if self.budget.exceeded(run_id):
-            self.budget.mark_aborted(run_id)
-            log.warning("llm_budget_abort", run_id=run_id, key=key[:12], model=model)
-            return _error(400, "invalid_request_error", "mcp-chaos budget exceeded")
+            max_tokens = body.get("max_tokens")
+            worst = worst_case_cost(
+                model,
+                est_input_tokens=len(raw) // 3 + 1,
+                max_tokens=max_tokens
+                if isinstance(max_tokens, int) and not isinstance(max_tokens, bool)
+                else 0,
+            )
+            reservation = self.budget.reserve(run_id, worst)
+            if reservation is None:
+                self.budget.mark_aborted(run_id)
+                log.warning("llm_budget_abort", run_id=run_id, key=key[:12], model=model)
+                return _error(400, "invalid_request_error", "mcp-chaos budget exceeded")
 
-        return await self._forward(request, raw, run_id, key, seq, model, kind, stream)
+        return await self._forward(request, raw, run_id, key, seq, model, kind, stream, reservation)
 
     async def _forward(
         self,
@@ -190,6 +206,36 @@ class Gateway:
         model: str,
         kind: Kind,
         stream: bool,
+        reservation: Reservation | None,
+    ) -> Response:
+        handed_off = False
+        try:
+            resp = await self._forward_inner(
+                request, raw, run_id, key, seq, model, kind, stream, reservation
+            )
+            handed_off = isinstance(resp, StreamingResponse) and resp.status_code == 200 and stream
+            return resp
+        except BaseException as e:
+            # Fail closed: the upstream may have processed the request; only a connect failure is
+            # known to have cost nothing.
+            if reservation is not None and not handed_off:
+                if isinstance(e, httpx.ConnectError | httpx.ConnectTimeout):
+                    self.budget.settle(reservation, TokenCounts(), 0.0)
+                else:
+                    self.budget.settle(reservation, TokenCounts(), reservation.worst_case_usd)
+            raise
+
+    async def _forward_inner(
+        self,
+        request: Request,
+        raw: bytes,
+        run_id: str,
+        key: str,
+        seq: int,
+        model: str,
+        kind: Kind,
+        stream: bool,
+        reservation: Reservation | None,
     ) -> Response:
         headers: dict[str, str] = {"content-type": "application/json"}
         for h in _FORWARD_HEADERS:
@@ -205,7 +251,7 @@ class Gateway:
             up = await self._client.send(req, stream=True)
             if up.status_code == 200:
                 return StreamingResponse(
-                    self._relay(up, run_id, key, seq, model),
+                    self._relay(up, run_id, key, seq, model, reservation),
                     status_code=200,
                     headers=self._out_headers(up),
                 )
@@ -223,7 +269,7 @@ class Gateway:
 
         stored = StoredResponse.from_body(status, out_headers, body)
         tokens = usage_from_body(body) if status == 200 and kind == "messages" else TokenCounts()
-        self._finalize(run_id, key, seq, model, kind, stored, tokens)
+        self._finalize(run_id, key, seq, model, kind, stored, tokens, reservation)
         return Response(
             body, status_code=status, headers={**out_headers, "x-mcp-chaos-source": "upstream"}
         )
@@ -234,7 +280,13 @@ class Gateway:
         return {"content-type": ct} if ct else {}
 
     async def _relay(
-        self, up: httpx.Response, run_id: str, key: str, seq: int, model: str
+        self,
+        up: httpx.Response,
+        run_id: str,
+        key: str,
+        seq: int,
+        model: str,
+        reservation: Reservation | None,
     ) -> AsyncIterator[bytes]:
         chunks: list[bytes] = []
         complete = False
@@ -246,10 +298,28 @@ class Gateway:
                 yield chunk
             complete = True
         finally:
-            await up.aclose()
-        if complete:
-            stored = StoredResponse.from_sse(up.status_code, self._out_headers(up), chunks)
-            self._finalize(run_id, key, seq, model, "messages", stored, usage_from_sse(chunks))
+            # Settle first and synchronously: this runs on client disconnect / cancellation too.
+            try:
+                tokens = usage_from_sse(chunks)
+                if complete:
+                    stored = StoredResponse.from_sse(up.status_code, self._out_headers(up), chunks)
+                    self._finalize(run_id, key, seq, model, "messages", stored, tokens, reservation)
+                elif reservation is not None:
+                    seen = tokens.input or tokens.output or tokens.cache_read or tokens.cache_write
+                    if seen:
+                        cost = compute_cost(
+                            model,
+                            input_tokens=tokens.input,
+                            output_tokens=tokens.output,
+                            cache_write_tokens=tokens.cache_write,
+                            cache_read_tokens=tokens.cache_read,
+                        )
+                    else:  # nothing observed (early disconnect): fail closed
+                        cost = reservation.worst_case_usd
+                    self.budget.settle(reservation, tokens, cost)
+                    log.warning("llm_stream_incomplete", run_id=run_id, model=model, cost_usd=cost)
+            finally:
+                await up.aclose()
 
     def _finalize(
         self,
@@ -260,6 +330,7 @@ class Gateway:
         kind: Kind,
         stored: StoredResponse,
         tokens: TokenCounts,
+        reservation: Reservation | None = None,
     ) -> None:
         cost = 0.0
         if kind == "messages" and stored.status == 200:
@@ -270,7 +341,10 @@ class Gateway:
                 cache_write_tokens=tokens.cache_write,
                 cache_read_tokens=tokens.cache_read,
             )
-        self.budget.record(run_id, tokens, cost)
+        if reservation is not None:
+            self.budget.settle(reservation, tokens, cost)
+        else:
+            self.budget.record(run_id, tokens, cost)
         if stored.status == 200:
             self.cache.put(key, stored)
         self.cassette.append(run_id, CassetteEntry.from_response(seq, key, stored))
