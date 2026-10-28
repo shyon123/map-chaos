@@ -1,0 +1,9 @@
+{
+  "model": "claude-haiku-5-5",
+  "max_tokens": 256,
+  "system": "You are a test agent. Today's date is 2026-10-28. Session 123e4567-e89b-12d3-a456-426614174000.",
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "List files in /tmp/pytest-of-user/pytest-3/work and note the time 2026-10-28T09:15:00Z."}]}
+  ],
+  "metadata": {"user_id": "session-abc"}
+}
