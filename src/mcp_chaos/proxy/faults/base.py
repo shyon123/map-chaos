@@ -23,6 +23,8 @@ class FaultOutcome:
     """``response_obj`` is the replacement JSON-RPC message (None = keep the original)."""
 
     response_obj: dict[str, Any] | None = None
+    # raw replacement line (frame-level corruption); takes precedence over response_obj
+    response_bytes: bytes | None = None
     delay_s: float = 0.0
     hang: bool = False
     crash: bool = False

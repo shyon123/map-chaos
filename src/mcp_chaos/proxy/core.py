@@ -317,6 +317,8 @@ class ProxyCore:
             if outcome.response_obj is not None:
                 out_obj = outcome.response_obj
                 out_line = _dumps(out_obj)
+            if outcome.response_bytes is not None:
+                out_line = outcome.response_bytes
         actions: list[Action] = [
             self._response_event("tools/call", out_obj, p, decision.call_index, fault_applied, None)
         ]
