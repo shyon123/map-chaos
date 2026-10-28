@@ -1,0 +1,9 @@
+order_id,region,product,units,unit_price
+F-2001,West,Gizmo,33,12.25
+F-2002,North,Widget,25,24.50
+F-2003,South,Gadget,11,89.99
+F-2004,West,Gadget,9,89.99
+F-2005,North,Gizmo,18,12.25
+F-2006,South,Widget,30,24.50
+F-2007,West,Widget,6,24.50
+F-2008,North,Gadget,14,89.99

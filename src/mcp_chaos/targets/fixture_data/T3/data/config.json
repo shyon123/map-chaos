@@ -1,0 +1,10 @@
+{
+  "app_name": "inventory-sync",
+  "log_level": "info",
+  "db_host": "10.0.0.5",
+  "db_port": 5432,
+  "db_name": "inventory",
+  "timeout": "30",
+  "debug": false,
+  "retries": 3
+}

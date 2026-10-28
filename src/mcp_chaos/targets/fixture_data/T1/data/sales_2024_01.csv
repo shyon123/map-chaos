@@ -1,0 +1,9 @@
+order_id,region,product,units,unit_price
+J-1001,North,Widget,12,24.50
+J-1002,South,Widget,8,24.50
+J-1003,West,Gadget,5,89.99
+J-1004,North,Gadget,3,89.99
+J-1005,South,Gizmo,20,12.25
+J-1006,West,Widget,15,24.50
+J-1007,North,Gizmo,40,12.25
+J-1008,South,Gadget,7,89.99

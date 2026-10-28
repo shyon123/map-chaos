@@ -1,0 +1,9 @@
+order_id,region,product,units,unit_price
+M-3001,South,Gizmo,50,12.25
+M-3002,West,Gadget,12,89.99
+M-3003,North,Widget,19,24.50
+M-3004,South,Gadget,4,89.99
+M-3005,West,Gizmo,27,12.25
+M-3006,North,Gadget,8,89.99
+M-3007,South,Widget,16,24.50
+M-3008,West,Widget,21,24.50

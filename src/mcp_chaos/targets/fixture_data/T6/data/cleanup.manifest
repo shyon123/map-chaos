@@ -1,0 +1,5 @@
+# Temporary files to delete (paths relative to the project root).
+# Lines starting with # are comments.
+workspace/cache/session_a1b2.tmp
+workspace/cache/render_output.tmp
+workspace/build/intermediate.tmp

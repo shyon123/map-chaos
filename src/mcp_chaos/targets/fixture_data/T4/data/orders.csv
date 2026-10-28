@@ -1,0 +1,21 @@
+order_id,customer,amount
+ORD-1001,Acme Corp,120.00
+ORD-1002,Birch & Co,75.50
+ORD-1003,Cedar Ltd,310.25
+ORD-1004,Delta LLC,45.00
+ORD-1005,Evergreen Inc,980.00
+ORD-1006,Fjord AS,15.99
+ORD-1007,Granite Co,250.00
+ORD-1008,Harbor Ltd,64.20
+ORD-1009,Ivy Works,501.10
+ORD-1010,Juniper LLC,33.33
+ORD-1011,Kestrel Inc,720.00
+ORD-1012,Lumen Corp,88.88
+ORD-1013,Maple Co,199.99
+ORD-1014,Nimbus Ltd,42.00
+ORD-1015,Orchid LLC,615.75
+ORD-1016,Pioneer Inc,27.50
+ORD-1017,Quartz Corp,340.00
+ORD-1018,Raven Co,19.95
+ORD-1019,Summit Ltd,455.40
+ORD-1020,Tundra LLC,92.10
