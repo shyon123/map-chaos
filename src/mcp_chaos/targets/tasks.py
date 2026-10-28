@@ -93,7 +93,8 @@ TASKS: dict[str, Task] = {
             "product, units, unit_price; insert every row exactly once). Then write report.md "
             "in the project root containing the total revenue per region, where revenue is "
             "units * unit_price summed over all rows of that region. Put each region "
-            "(North, South, West) on its own line followed by its total in dollars."
+            "(North, South, West) on its own line followed by its total in dollars. "
+            "Do not commit anything to git."
         ),
         required_workers=frozenset({"files", "data"}),
         expected={"region_totals": dict(T1_TOTALS), "row_count": 24},
@@ -131,7 +132,8 @@ TASKS: dict[str, Task] = {
             "against data/orders.csv (same columns). An order is a mismatch if its order_id "
             "exists in only one of the two sources, or if it exists in both but the amounts "
             "differ. Write the order_id of every mismatch, one per line, to mismatches.txt "
-            "in the project root. Do not modify the database or the CSV."
+            "in the project root. Do not modify the database or the CSV, "
+            "and do not commit anything to git."
         ),
         required_workers=frozenset({"data", "files"}),
         expected={"mismatched_ids": list(T4_IDS)},
@@ -143,7 +145,7 @@ TASKS: dict[str, Task] = {
             "What is Dana Whitfield's 2024 annual bonus in dollars? Her department and base "
             "salary are in the `employees` table of db.sqlite, and the bonus formula and "
             "rates are in data/bonus_policy.md (use the current 2024 rates). Do not modify "
-            "any files or data. Reply with the final answer as a number in dollars."
+            "any files or data, and do not commit anything to git. Reply with the final answer as a number in dollars."
         ),
         required_workers=frozenset({"data", "files"}),
         expected={"answer": T5_ANSWER, "distractors": list(T5_DISTRACTORS)},
