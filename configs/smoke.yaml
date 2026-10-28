@@ -1,0 +1,15 @@
+# Smoke matrix: 1 framework x T5 x 2 cells x 1 arm x 1 seed = 2 runs.
+bench_id: smoke
+cells_file: cells.yaml
+cells: [clean, F08-echo_in_answer]
+frameworks: [langgraph]
+tasks: [T5]
+arms:
+  - name: baseline
+    hardening: null
+seeds: [0]
+agent_model: claude-haiku-5-5
+max_turns: 25
+timeout_s: 300
+per_run_budget_usd: 0.5
+concurrency: 1

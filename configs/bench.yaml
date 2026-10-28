@@ -1,0 +1,37 @@
+# Default matrix: 2 frameworks x 6 tasks x 12 cells x 2 arms x 3 seeds = 864 runs (SPEC section 5).
+# Cells come from cells.yaml (16 defined; the 12 below are the default set. Add F05-catalog and the
+# other F08 templates here to widen the matrix).
+bench_id: bench-main
+cells_file: cells.yaml
+cells:
+  - clean
+  - F01-timeout
+  - F02-latency
+  - F03-server_error
+  - F04-malformed_json
+  - F05-content
+  - F06-stale_data
+  - F07-oversized_output
+  - F08-echo_in_answer
+  - F09-empty_result
+  - F10-lying_status
+  - F11-tool_vanish
+frameworks: [langgraph, agentsdk]
+tasks: all
+arms:
+  - name: baseline
+    hardening: null
+  - name: guard_full
+    hardening:
+      schema_validation: true
+      retry: true
+      circuit_breaker: true
+      injection_filter: true
+      size_cap: true
+      prompt_addendum: false
+seeds: [0, 1, 2]
+agent_model: claude-haiku-5-5
+max_turns: 25
+timeout_s: 300
+per_run_budget_usd: 0.5
+concurrency: 4

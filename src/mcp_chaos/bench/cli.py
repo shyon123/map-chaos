@@ -50,6 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--tasks", default="all")
     b.add_argument("--seeds", default="0,1,2")
     common(b)
+    m = sub.add_parser("run", help="run the benchmark matrix from a YAML config")
+    m.add_argument("--config", required=True, type=Path)
+    m.add_argument("--mode", choices=["live", "record", "replay"], default="replay")
+    m.add_argument("--budget-usd", type=float, default=25.0)
+    m.add_argument("--sandbox", choices=["docker", "local"], default="docker")
+    m.add_argument("--limit", type=int, default=None, help="run only the first N runs")
+    m.add_argument("--dry-run", action="store_true", help="print matrix size and cost; spend $0")
+    m.add_argument("--yes", action="store_true", help="confirm live/record spending")
     return parser
 
 
@@ -219,6 +227,69 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
     return _execute(args, cfgs, args.budget_usd)
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    from mcp_chaos.bench.matrix import (
+        ConfigError,
+        estimate_cost,
+        expand,
+        load_config,
+        run_matrix,
+        summarize,
+    )
+
+    try:
+        cfg = load_config(args.config)
+        runs = expand(cfg)
+    except (ConfigError, KeyError) as e:
+        sys.stderr.write(f"mcp-chaos: {e}\n")
+        return 2
+    if args.limit is not None:
+        runs = runs[: max(args.limit, 0)]
+    low, high = estimate_cost(runs)
+    if args.dry_run or args.mode != "replay":
+        print(f"bench {cfg.bench_id}: {len(runs)} runs (mode={args.mode})")
+        for group, counts in summarize(cfg, runs).items():
+            print(f"  by {group}: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
+        print(f"estimated cost: ${low:.2f} - ${high:.2f} (budget cap ${args.budget_usd:g})")
+    if args.dry_run:
+        return 0
+    _load_env_file(Path(".env"))
+    if args.mode != "replay":
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            sys.stderr.write("mcp-chaos: ANTHROPIC_API_KEY is required for live/record mode\n")
+            return 2
+        if not args.yes:
+            sys.stderr.write("mcp-chaos: live/record spends money; re-run with --yes\n")
+            return 2
+    configure_logging()
+    from mcp_chaos.bench.gateway_host import GatewayStartError
+    from mcp_chaos.bench.runner import RunnerError
+
+    try:
+        manifest = run_matrix(
+            cfg,
+            mode=args.mode,
+            sandbox=args.sandbox,
+            global_budget_usd=args.budget_usd,
+            results_root=Path("results"),
+            limit=args.limit,
+            cassette_root=Path("cassettes"),
+            cache_dir=Path(".cache") / "llm",
+        )
+    except (RunnerError, GatewayStartError, OSError) as e:
+        sys.stderr.write(f"mcp-chaos: {e}\n")
+        return 1
+    print(
+        f"planned={manifest.n_planned} executed={manifest.n_completed} "
+        f"skipped={manifest.n_skipped} status={manifest.status_counts} "
+        f"cost=${manifest.total_cost_usd:.4f}"
+    )
+    if manifest.aborted:
+        sys.stderr.write(f"mcp-chaos: aborted: {manifest.abort_reason}\n")
+        return 3
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     upstream: list[str] = []
@@ -234,6 +305,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_proxy(args, upstream)
     if args.command == "run-one":
         return _cmd_run_one(args)
+    if args.command == "run":
+        return _cmd_run(args)
     if args.command == "baseline":
         return _cmd_baseline(args)
     return 0
