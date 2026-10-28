@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from mcp_chaos.bench import runner
 from mcp_chaos.bench.cli import _load_env_file, main
 from mcp_chaos.bench.gateway_host import GatewayHost
 from mcp_chaos.bench.runner import RunnerError, load_runs, run_one
@@ -120,8 +123,15 @@ def test_missing_result_is_harness_error(
 
 
 def test_agentsdk_is_harness_error(gw: GatewayHost, tmp_path: Path) -> None:
-    base = make_cfg()
-    cfg = base.model_copy(update={"framework": "agentsdk", "run_id": "sdk1"})
+    cfg = RunConfig.with_derived_id(
+        framework="agentsdk",
+        task_id="T5",
+        fault_plan=FaultPlan(plan_id="clean", seed=0, faults=[]),
+        seed=0,
+        max_turns=10,
+        timeout_s=60,
+        budget_usd=0.5,
+    )
     r = run_one(
         cfg, sandbox="local", gw=gw, results_dir=tmp_path / "results", work_root=tmp_path / "w"
     )
@@ -133,9 +143,10 @@ def test_resume_config_drift_raises(
 ) -> None:
     cfg = make_cfg(seed=4)
     go(cfg, gw, tmp_path, "t5_data_only.json", monkeypatch)
-    drifted = cfg.model_copy(update={"max_turns": 99})  # same run_id, different config
+    f = tmp_path / "results" / "runs.jsonl"  # stored result tampered with after the fact
+    f.write_text(f.read_text().replace('"max_turns":10', '"max_turns":99'))
     with pytest.raises(RunnerError, match="drift"):
-        go(drifted, gw, tmp_path, "t5_data_only.json", monkeypatch)
+        go(cfg, gw, tmp_path, "t5_data_only.json", monkeypatch)
     assert len(runs(tmp_path / "results")) == 1
 
 
@@ -154,6 +165,70 @@ def test_harness_error_is_rerun_and_superseded(
     loaded = load_runs(tmp_path / "results" / "runs.jsonl")
     assert list(loaded) == [cfg.run_id] and loaded[cfg.run_id].status == "completed"
     assert load_runs(tmp_path / "missing.jsonl") == {}
+
+
+def test_run_id_mismatch_raises(gw: GatewayHost, tmp_path: Path) -> None:
+    forged = make_cfg(seed=7).model_copy(update={"run_id": "deadbeefdeadbeef"})
+    with pytest.raises(RunnerError, match="does not match"):
+        run_one(
+            forged, sandbox="local", gw=gw, results_dir=tmp_path / "r", work_root=tmp_path / "w"
+        )
+    assert not (tmp_path / "r").exists()
+
+
+def _fake_entry(mp: pytest.MonkeyPatch, code: str) -> None:
+    mp.setattr(runner, "_local_argv", lambda run: [sys.executable, "-c", code])
+
+
+def test_local_grandchild_is_killed(
+    gw: GatewayHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile = tmp_path / "sleeper.pid"
+    sleeper = (
+        "import os,time;p=os.environ['MCP_CHAOS_SCRATCH'];"
+        "\nwhile True:\n open(p+'/beat','w').write('x');time.sleep(0.05)"
+    )
+    code = (
+        "import subprocess,sys;"
+        f"c=subprocess.Popen([sys.executable,'-c',{sleeper!r}]);"
+        f"open({str(pidfile)!r},'w').write(str(c.pid))"
+    )
+    _fake_entry(monkeypatch, code)
+    monkeypatch.setattr(runner, "TERM_GRACE_S", 5.0)
+    r = run_one(
+        make_cfg(seed=8),
+        sandbox="local",
+        gw=gw,
+        results_dir=tmp_path / "results",
+        work_root=tmp_path / "w",
+    )
+    assert r.status == "harness_error"  # the fake entry wrote no result.json
+    pid = int(pidfile.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_scratch_quota_watchdog_kills_run(
+    gw: GatewayHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = (
+        "import os,time;p=os.environ['MCP_CHAOS_SCRATCH']+'/fill.bin';"
+        "open(p,'wb').write(b'x'*(4<<20));time.sleep(120)"
+    )
+    _fake_entry(monkeypatch, code)
+    monkeypatch.setattr(runner, "WATCHDOG_INTERVAL_S", 0.1)
+    r = run_one(
+        make_cfg(seed=9),
+        sandbox="local",
+        gw=gw,
+        results_dir=tmp_path / "results",
+        work_root=tmp_path / "w",
+        scratch_quota_bytes=1 << 20,
+    )
+    assert r.status == "agent_error"
+    assert r.check is not None and not r.check.success
+    assert r.check.details["error"] == "scratch_quota_exceeded"
+    assert r.wall_s < 60
 
 
 def test_fake_models_refused_in_docker(

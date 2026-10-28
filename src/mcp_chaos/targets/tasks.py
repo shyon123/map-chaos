@@ -16,7 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from mcp_chaos.bench.safe_repo import UnsafeRepoError, sanitized_copy
-from mcp_chaos.bench.snapshot import connect_ro
+from mcp_chaos.bench.snapshot import open_untrusted_db, plain_tables, unknown_objects
 from mcp_chaos.schemas.results import SideEffects
 from mcp_chaos.targets.fixtures import (
     FIXTURE_DATA,
@@ -256,8 +256,13 @@ def _t1_db_rows(scratch: Path) -> Counter[tuple[str, str, str, int, Decimal]] | 
     path = scratch / "db.sqlite"
     if not path.is_file():
         return None
-    conn = connect_ro(path)
     try:
+        conn = open_untrusted_db(path)
+    except sqlite3.Error:
+        return None
+    try:
+        if unknown_objects(conn) or "sales" not in plain_tables(conn):
+            return None
         cur = conn.execute("SELECT order_id, region, product, units, unit_price FROM sales")
         return Counter(
             (str(o), str(r), str(p), int(u), Decimal(str(price)).quantize(Decimal("0.01")))

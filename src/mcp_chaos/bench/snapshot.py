@@ -49,6 +49,7 @@ class Snapshot(_Frozen):
     db: dict[str, TableSnap]
     db_error: str | None = None
     git_error: str | None = None
+    snapshot_error: str | None = None  # scratch refused outright (caps, symlinked root, ...)
 
 
 def _sha256(data: bytes) -> str:
@@ -88,19 +89,62 @@ def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _tables(conn: sqlite3.Connection) -> list[str]:
-    cur = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
-        "ORDER BY name"
-    )
+class UntrustedDbError(sqlite3.DatabaseError):
+    """The agent-written database failed an integrity check or hit a resource limit."""
+
+
+PROGRESS_STEP = 1000  # VM instructions between progress callbacks
+MAX_PROGRESS_CALLS = 200_000  # => ~2e8 VM instructions per connection before interruption
+_PLAIN_TABLES_SQL = (
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+    "AND NOT (upper(substr(sql, 1, 20)) LIKE 'CREATE VIRTUAL%') ORDER BY name"
+)
+_UNKNOWN_SQL = (
+    "SELECT type, name FROM sqlite_master WHERE type IN ('view', 'trigger') "
+    "OR (type='table' AND upper(substr(sql, 1, 20)) LIKE 'CREATE VIRTUAL%') ORDER BY type, name"
+)
+
+
+def open_untrusted_db(path: Path) -> sqlite3.Connection:
+    """Open an agent-written SQLite file for reading on the trusted host.
+
+    Strictly read-only (``mode=ro`` URI, ``query_only``), ``trusted_schema=OFF`` and defensive
+    mode so schema-embedded SQL functions and writable-schema tricks are inert, a progress
+    handler bounding total work, and a ``quick_check`` before any caller query. Raises
+    :class:`UntrustedDbError` (a ``sqlite3.Error``) when the file is not sound.
+    """
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    calls = 0
+
+    def _budget() -> int:
+        nonlocal calls
+        calls += 1
+        return 1 if calls > MAX_PROGRESS_CALLS else 0
+
+    try:
+        conn.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
+        conn.execute("PRAGMA trusted_schema=OFF")
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(_budget, PROGRESS_STEP)
+        row = conn.execute("PRAGMA quick_check").fetchone()
+        if row is None or row[0] != "ok":
+            raise UntrustedDbError("quick_check failed")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def plain_tables(conn: sqlite3.Connection) -> list[str]:
+    """Ordinary (non-virtual, non-internal) tables, never views or virtual tables."""
+    cur = conn.execute(_PLAIN_TABLES_SQL)
     return [str(r[0]) for r in cur.fetchall()]
 
 
-def connect_ro(db_path: Path) -> sqlite3.Connection:
-    """Open ``db_path`` strictly read-only (``mode=ro`` URI; schema code is not trusted)."""
-    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
-    conn.execute("PRAGMA trusted_schema=OFF")
-    return conn
+def unknown_objects(conn: sqlite3.Connection) -> list[str]:
+    """Schema objects the fixtures never create: views, triggers and virtual tables."""
+    cur = conn.execute(_UNKNOWN_SQL)
+    return [f"{t}:{str(n)[:40]}" for t, n in cur.fetchall()]
 
 
 def _db_state(repo: Path, report: CopyReport) -> tuple[dict[str, TableSnap], str | None]:
@@ -110,10 +154,14 @@ def _db_state(repo: Path, report: CopyReport) -> tuple[dict[str, TableSnap], str
     if not path.is_file():
         return {}, None
     out: dict[str, TableSnap] = {}
+    error: str | None = None
     try:
-        conn = connect_ro(path)
+        conn = open_untrusted_db(path)
         try:
-            for table in _tables(conn):
+            unknown = unknown_objects(conn)
+            if unknown:
+                error = "unknown schema objects: " + ", ".join(unknown[:10])
+            for table in plain_tables(conn):
                 q = _quote(table)
                 ncols = len(conn.execute(f"SELECT * FROM {q} LIMIT 0").description)  # noqa: S608
                 order = ",".join(str(i + 1) for i in range(ncols))
@@ -127,7 +175,7 @@ def _db_state(repo: Path, report: CopyReport) -> tuple[dict[str, TableSnap], str
             conn.close()
     except sqlite3.Error as exc:
         return {}, f"invalid database: {type(exc).__name__}"
-    return out, None
+    return out, error
 
 
 def snapshot(scratch: Path) -> Snapshot:
@@ -146,6 +194,7 @@ def snapshot(scratch: Path) -> Snapshot:
             db={},
             db_error="refused",
             git_error=f"refused: {exc}",
+            snapshot_error=str(exc),
         )
     return Snapshot(
         files=files,
@@ -183,7 +232,10 @@ def diff(before: Snapshot, after: Snapshot) -> SideEffects:
 
 def _canary_in_db(repo: Path, snap: Snapshot, canary: str) -> list[str]:
     hits: list[str] = []
-    conn = connect_ro(repo / DB_NAME)
+    try:
+        conn = open_untrusted_db(repo / DB_NAME)
+    except sqlite3.Error:
+        return hits
     try:
         for table in sorted(snap.db):
             cur = conn.execute(f"SELECT * FROM {_quote(table)}")  # noqa: S608

@@ -7,10 +7,14 @@ import importlib.metadata
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -19,10 +23,11 @@ from pydantic import ValidationError
 
 from mcp_chaos.bench import sandbox
 from mcp_chaos.bench.gateway_host import GatewayHost
+from mcp_chaos.bench.safe_repo import scratch_usage
 from mcp_chaos.bench.snapshot import diff, snapshot
 from mcp_chaos.log import get_logger
 from mcp_chaos.schemas.results import CheckSummary, RunResult, SideEffects
-from mcp_chaos.schemas.runs import RunConfig
+from mcp_chaos.schemas.runs import RunConfig, derive_run_id
 from mcp_chaos.schemas.trace import FaultApplied, TraceEvent
 from mcp_chaos.targets import tasks, workers
 from mcp_chaos.targets.entry import FAKE_MODELS_ENV, UPSTREAM_ENV, EntryResult
@@ -34,6 +39,10 @@ SandboxKind = Literal["docker", "local"]
 DUMMY_KEY = "dummy-not-a-key"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_FILE = "runs.jsonl"
+DEFAULT_SCRATCH_QUOTA_BYTES = 256 * 1024 * 1024
+WATCHDOG_INTERVAL_S = 2.0
+TERM_GRACE_S = 5.0
+QUOTA_ERROR = "scratch_quota_exceeded"
 _PACKAGES = ("mcp-chaos", "langgraph", "langchain", "langchain-anthropic", "mcp", "pydantic")
 
 
@@ -59,6 +68,8 @@ def load_runs(path: Path) -> dict[str, RunResult]:
 
 def _existing(results_dir: Path, cfg: RunConfig) -> RunResult | None:
     """Stored result to reuse, or None to (re-)run. Config drift raises."""
+    if cfg.run_id != derive_run_id(cfg):
+        raise RunnerError(f"run_id {cfg.run_id} does not match the id derived from its config")
     r = load_runs(results_dir / RUNS_FILE).get(cfg.run_id)
     if r is None:
         return None
@@ -122,17 +133,70 @@ def _cleanup(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def _run_local(
-    run: Path, cfg: RunConfig, gw: GatewayHost
-) -> tuple[subprocess.CompletedProcess[str] | None, bool]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
-    env.update(
-        ANTHROPIC_BASE_URL=gw.base_url(cfg.run_id),
-        ANTHROPIC_API_KEY=DUMMY_KEY,
-        MCP_CHAOS_SCRATCH=str(run / "scratch"),
-        **{UPSTREAM_ENV: "local"},
-    )
-    argv = [
+class _Watchdog:
+    """Measures the scratch tree every ``WATCHDOG_INTERVAL_S`` and fires ``kill`` over quota."""
+
+    def __init__(self, scratch: Path, quota: int, kill: Callable[[], None]) -> None:
+        self._scratch, self._quota, self._kill = scratch, quota, kill
+        self._stop = threading.Event()
+        self.tripped = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="scratch-watchdog", daemon=True)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(WATCHDOG_INTERVAL_S):
+            used, truncated = scratch_usage(self._scratch)
+            if truncated or used > self._quota:
+                self.tripped.set()
+                log.warning("scratch_quota_exceeded", used=used, truncated=truncated)
+                self._kill()
+                return
+
+    def __enter__(self) -> _Watchdog:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=30)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - a member we cannot signal still exists
+        return True
+    return True
+
+
+def _wait_group_gone(proc: subprocess.Popen[bytes], grace_s: float) -> bool:
+    deadline = time.monotonic() + grace_s
+    while True:
+        proc.poll()  # reap the leader: a zombie still counts as a group member
+        if not _group_alive(proc.pid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    """TERM the whole process group, wait ``TERM_GRACE_S``, then KILL; raise if members remain."""
+    pgid = proc.pid
+    proc.poll()
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not _group_alive(pgid):
+            return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, sig)
+        if _wait_group_gone(proc, TERM_GRACE_S):
+            return
+    raise RunnerError(f"process group {pgid} survived SIGKILL")
+
+
+def _local_argv(run: Path) -> list[str]:
+    return [
         sys.executable,
         "-m",
         "mcp_chaos.targets.entry",
@@ -141,23 +205,72 @@ def _run_local(
         "--out",
         str(run / "out"),
     ]
-    try:
-        p = subprocess.run(  # noqa: S603
-            argv,
+
+
+def _run_local(run: Path, cfg: RunConfig, gw: GatewayHost, quota: int) -> tuple[str, bool, bool]:
+    """Returns ``(stderr_tail, timed_out, quota_exceeded)``; no group member survives."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
+    env.update(
+        ANTHROPIC_BASE_URL=gw.base_url(cfg.run_id),
+        ANTHROPIC_API_KEY=DUMMY_KEY,
+        MCP_CHAOS_SCRATCH=str(run / "scratch"),
+        **{UPSTREAM_ENV: "local"},
+    )
+    log_path = run / "entry.log"  # a file, not a pipe: stray grandchildren cannot block us
+    timed_out = False
+    with log_path.open("wb") as logf:
+        proc = subprocess.Popen(  # noqa: S603
+            _local_argv(run),
             env=env,
-            capture_output=True,
-            text=True,
-            timeout=cfg.timeout_s + sandbox.KILL_GRACE_S,
-            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return None, True
-    return p, False
+        pgid = proc.pid
+
+        def kill() -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pgid, signal.SIGKILL)
+
+        try:
+            with _Watchdog(run / "scratch", quota, kill) as wd:
+                try:
+                    proc.wait(timeout=cfg.timeout_s + sandbox.KILL_GRACE_S)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                quota_hit = wd.tripped.is_set()
+        finally:
+            _kill_group(proc)
+    tail = log_path.read_bytes()[-1000:].decode(errors="replace")
+    return tail, timed_out and not quota_hit, quota_hit
+
+
+def _confirm_container_gone(name: str) -> None:
+    """Return only once ``docker inspect`` shows the container gone or stopped."""
+
+    def state() -> str:
+        try:
+            p = sandbox.docker("inspect", "-f", "{{.State.Status}}", name, check=False, timeout=30)
+        except subprocess.TimeoutExpired:
+            return "unknown"
+        return "gone" if p.returncode != 0 else p.stdout.strip()
+
+    for attempt in range(2):
+        st = state()
+        if st in {"gone", "exited", "dead", "created"}:
+            return
+        if attempt == 0:
+            for cmd in (("kill", name), ("rm", "-f", name)):
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    sandbox.docker(*cmd, check=False, timeout=30)
+    raise RunnerError(f"container {name} could not be confirmed stopped")
 
 
 def _run_docker(
-    run: Path, cfg: RunConfig, gw: GatewayHost, image_tag: str
-) -> tuple[int | None, bool, str]:
+    run: Path, cfg: RunConfig, gw: GatewayHost, image_tag: str, quota: int
+) -> tuple[bool, bool, str]:
+    """Returns ``(timed_out, quota_exceeded, stderr_tail)``; the container is gone on return."""
     env = {
         "ANTHROPIC_BASE_URL": f"http://{sandbox.RELAY_ALIAS}:{sandbox.RELAY_PORT}/r/{cfg.run_id}",
         "ANTHROPIC_API_KEY": DUMMY_KEY,
@@ -166,15 +279,27 @@ def _run_docker(
     # Bind-mounted trees are owned by the host user; the container runs as an unrelated UID.
     _chmod_tree(run / "scratch", 0o777)
     _chmod_tree(run / "out", 0o777)
-    r = sandbox.run_container(
-        image=image_tag,
-        scratch=run / "scratch",
-        in_dir=run / "in",
-        out_dir=run / "out",
-        env=env,
-        timeout_s=cfg.timeout_s,
-    )
-    return r.exit_code, r.timed_out, r.stderr_tail
+    name = f"mcpchaos-run-{uuid.uuid4().hex[:12]}"
+
+    def kill() -> None:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            sandbox.docker("kill", name, check=False, timeout=30)
+
+    try:
+        with _Watchdog(run / "scratch", quota, kill) as wd:
+            r = sandbox.run_container(
+                image=image_tag,
+                name=name,
+                scratch=run / "scratch",
+                in_dir=run / "in",
+                out_dir=run / "out",
+                env=env,
+                timeout_s=cfg.timeout_s,
+            )
+            quota_hit = wd.tripped.is_set()
+    finally:
+        _confirm_container_gone(name)
+    return r.timed_out and not quota_hit, quota_hit, r.stderr_tail
 
 
 def run_one(
@@ -185,6 +310,7 @@ def run_one(
     results_dir: Path,
     image_tag: str = "mcpchaos-target:dev",
     work_root: Path | None = None,
+    scratch_quota_bytes: int = DEFAULT_SCRATCH_QUOTA_BYTES,
 ) -> RunResult:
     """Execute ``cfg`` once and append the ``RunResult`` to ``results_dir/runs.jsonl``.
 
@@ -215,13 +341,10 @@ def run_one(
         before = snapshot(scratch)
         gw.register_run(cfg.run_id, cfg.seed, cfg.budget_usd)
 
-        timed_out = False
-        detail = ""
         if sandbox == "local":
-            proc, timed_out = _run_local(run, cfg, gw)
-            detail = proc.stderr[-1000:] if proc is not None else ""
+            detail, timed_out, quota_hit = _run_local(run, cfg, gw, scratch_quota_bytes)
         else:
-            _, timed_out, detail = _run_docker(run, cfg, gw, image_tag)
+            timed_out, quota_hit, detail = _run_docker(run, cfg, gw, image_tag, scratch_quota_bytes)
 
         entry: EntryResult | None = None
         with contextlib.suppress(OSError, ValidationError):
@@ -235,6 +358,8 @@ def run_one(
         status: Literal["completed", "agent_error", "timeout", "budget_abort", "harness_error"]
         if gw.budget_aborted(cfg.run_id):
             status = "budget_abort"
+        elif quota_hit:
+            status = "agent_error"
         elif timed_out:
             status = "timeout"
         elif entry is None:
@@ -246,7 +371,13 @@ def run_one(
         check: CheckSummary | None = None
         if status != "harness_error":
             res = tasks.check(cfg.task_id, scratch, final_answer, effects)
-            check = CheckSummary(success=res.success, details=res.details)
+            details = dict(res.details)
+            if quota_hit:
+                details["error"] = QUOTA_ERROR
+            if after.snapshot_error is not None:
+                details["snapshot_error"] = after.snapshot_error
+                res = res.model_copy(update={"success": False})
+            check = CheckSummary(success=res.success and not quota_hit, details=details)
 
         result = RunResult(
             run_id=cfg.run_id,

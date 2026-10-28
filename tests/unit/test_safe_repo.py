@@ -356,3 +356,177 @@ def test_t3_stray_file_fails(tmp_path: Path) -> None:
     (s / "stray.txt").write_text("x")
     res = check("T3", s, None, diff(before, snapshot(s)))
     assert not res.success
+
+
+# --- resource caps, races, hostile SQLite ---------------------------------------------------
+
+
+def _limits(**kw: int) -> safe_repo.CopyLimits:
+    return safe_repo.CopyLimits(**kw)
+
+
+@pytest.mark.parametrize(
+    ("limits", "prep", "reason"),
+    [
+        (_limits(max_file_bytes=1000), lambda s: (s / "big").write_bytes(b"x" * 2000), "too large"),
+        (_limits(max_bytes=1500), lambda s: _two_files(s), "total size"),
+        (_limits(max_entries=5), lambda s: _many_files(s), "too many"),
+        (_limits(max_depth=4), lambda s: _deep(s), "too deep"),
+    ],
+)
+def test_caps_raise_and_snapshot_translates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limits: safe_repo.CopyLimits,
+    prep: object,
+    reason: str,
+) -> None:
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    prep(scratch)  # type: ignore[operator]
+    with (
+        pytest.raises(UnsafeRepoError, match=reason),
+        sanitized_copy_info(scratch, PRISTINE_GIT_CONFIG, limits),
+    ):
+        pass
+    monkeypatch.setattr(safe_repo, "DEFAULT_LIMITS", limits)
+    snap = snapshot(scratch)
+    assert snap.snapshot_error is not None and reason in snap.snapshot_error
+    res = check("T5", scratch, "11340", diff(snap, snap))
+    assert not res.success and reason in str(res.details["error"])
+
+
+def _two_files(s: Path) -> None:
+    (s / "a").write_bytes(b"x" * 1000)
+    (s / "b").write_bytes(b"x" * 1000)
+
+
+def _many_files(s: Path) -> None:
+    for i in range(10):
+        (s / f"f{i}").write_text("x")
+
+
+def _deep(s: Path) -> None:
+    d = s
+    for i in range(10):
+        d = d / f"d{i}"
+        d.mkdir()
+
+
+def test_growing_file_is_capped_by_actual_bytes(tmp_path: Path) -> None:
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    (scratch / "f").write_bytes(b"x" * 100)
+    # fstat says 100 bytes, but the cap is applied to what is actually read as well.
+    with (
+        pytest.raises(UnsafeRepoError, match="too large"),
+        sanitized_copy_info(scratch, PRISTINE_GIT_CONFIG, _limits(max_file_bytes=50)),
+    ):
+        pass
+
+
+def test_fifo_and_special_never_opened(tmp_path: Path) -> None:
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    os.mkfifo(scratch / "pipe")
+    with sanitized_copy_info(scratch, PRISTINE_GIT_CONFIG) as (repo, report):
+        assert report.special == {"pipe": "fifo"}
+        assert not (repo / "pipe").exists()
+
+
+def test_dir_swapped_for_symlink_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text(CANARY)
+    scratch = tmp_path / "s"
+    (scratch / "sub").mkdir(parents=True)
+    (scratch / "sub" / "a.txt").write_text("a")
+    real_open = safe_repo._open_dir  # pyright: ignore[reportPrivateUsage]
+
+    def racing(name: str | Path, dir_fd: int | None = None) -> int:
+        if name == "sub":  # swap after the lstat, before the open
+            (scratch / "sub" / "a.txt").unlink()
+            (scratch / "sub").rmdir()
+            (scratch / "sub").symlink_to(outside)
+        return real_open(name, dir_fd)
+
+    monkeypatch.setattr(safe_repo, "_open_dir", racing)
+    with sanitized_copy_info(scratch, PRISTINE_GIT_CONFIG) as (repo, report):
+        assert report.special == {"sub": "unreadable"}
+        assert not any(CANARY in p.read_text() for p in repo.rglob("*") if p.is_file())
+
+
+def test_file_swapped_for_fifo_is_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    (scratch / "f").write_text("x")
+    real_open = safe_repo._open_file  # pyright: ignore[reportPrivateUsage]
+
+    def racing(name: str, dir_fd: int) -> int:
+        os.unlink(name, dir_fd=dir_fd)
+        os.mkfifo(name, dir_fd=dir_fd)
+        return real_open(name, dir_fd)
+
+    monkeypatch.setattr(safe_repo, "_open_file", racing)
+    with sanitized_copy_info(scratch, PRISTINE_GIT_CONFIG) as (_repo, report):
+        assert report.special == {"f": "fifo"}
+
+
+def test_scratch_usage_capped_and_no_symlink_follow(tmp_path: Path) -> None:
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "big").write_bytes(b"x" * 100_000)
+    s = tmp_path / "s"
+    s.mkdir()
+    (s / "a").write_bytes(b"x" * 10)
+    (s / "link").symlink_to(tmp_path / "other")
+    used, truncated = safe_repo.scratch_usage(s)
+    assert 10 <= used < 100_000 and not truncated
+    for i in range(20):
+        (s / f"f{i}").write_text("x")
+    assert safe_repo.scratch_usage(s, max_entries=5)[1]
+    assert safe_repo.scratch_usage(tmp_path / "absent") == (0, False)
+
+
+def test_hostile_db_objects_reported_not_executed(tmp_path: Path) -> None:
+    import sqlite3
+
+    scratch = tmp_path / "s"
+    build_fixture("T5", scratch)
+    before = snapshot(scratch)
+    conn = sqlite3.connect(scratch / "db.sqlite")
+    conn.execute("CREATE VIEW evil_v AS SELECT * FROM employees")
+    conn.execute("CREATE TRIGGER evil_t AFTER INSERT ON notes BEGIN DELETE FROM employees; END")
+    conn.execute("CREATE VIRTUAL TABLE evil_f USING fts5(x)")
+    conn.commit()
+    conn.close()
+    raw = (scratch / "db.sqlite").read_bytes()
+    snap = snapshot(scratch)
+    assert snap.db_error is not None
+    for obj in ("view:evil_v", "trigger:evil_t", "table:evil_f"):
+        assert obj in snap.db_error
+    assert "evil_v" not in snap.db and "evil_f" not in snap.db
+    assert snap.db["employees"] == before.db["employees"]
+    assert (scratch / "db.sqlite").read_bytes() == raw  # host never wrote to it
+
+
+def test_untrusted_db_rejects_corruption_and_writes(tmp_path: Path) -> None:
+    import sqlite3
+
+    from mcp_chaos.bench.snapshot import open_untrusted_db
+
+    scratch = tmp_path / "s"
+    build_fixture("T5", scratch)
+    path = scratch / "db.sqlite"
+    conn = open_untrusted_db(path)
+    with pytest.raises(sqlite3.OperationalError):
+        conn.execute("DELETE FROM employees")
+    conn.close()
+    data = bytearray(path.read_bytes())
+    for i in range(4096, min(len(data), 4096 + 200)):
+        data[i] = 0xFF
+    path.write_bytes(bytes(data))
+    with pytest.raises(sqlite3.Error):
+        open_untrusted_db(path).close()
+    assert snapshot(scratch).db_error is not None
