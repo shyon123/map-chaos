@@ -18,12 +18,20 @@ from mcp_chaos.schemas.faults import (
     ToolVanishParams,
     Trigger,
 )
-from mcp_chaos.schemas.results import BlastRadius, Labels, RunResult, SideEffects, Usage
+from mcp_chaos.schemas.results import (
+    BlastRadius,
+    CheckSummary,
+    Labels,
+    RunResult,
+    SideEffects,
+    Usage,
+)
 from mcp_chaos.schemas.runs import Framework, HardeningConfig, ModelConfig, RunConfig, derive_run_id
 from mcp_chaos.schemas.trace import Direction, FaultApplied, TraceEvent
 
 __all__ = [
     "BlastRadius",
+    "CheckSummary",
     "Direction",
     "EmptyResultParams",
     "FaultApplied",

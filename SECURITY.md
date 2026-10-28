@@ -12,7 +12,7 @@
 ## Controls
 | Threat | Control |
 |---|---|
-| Agent escapes to the host | Target agents + upstream MCP servers run in Docker: non-root UID, `--read-only` rootfs, a writable tmpfs `/scratch` only, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pids-limit`, `--memory`, `--cpus`, wall-clock kill |
+| Agent escapes to the host | Target agents + upstream MCP servers run in Docker: non-root UID, `--read-only` rootfs, a writable `/scratch` bind mount (not tmpfs, so the host can snapshot it; plus a 64 MB tmpfs `/tmp` and a bind-mounted `/run/out`) and nothing else writable, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pids-limit`, `--memory`, `--cpus`, wall-clock kill |
 | Network exfiltration | Container egress is limited to the Anthropic API via an allowlisting egress proxy; no other network access |
 | Dangerous tools | No shell-exec, HTTP-fetch, or credential-bearing tools in any target. Agent SDK built-ins (Bash, Write, WebFetch, …) are disabled; only allowlisted `mcp__*` tools are enabled. Filesystem/git/SQLite servers are rooted at `/scratch` |
 | Least privilege | Per-agent MCP tool allowlist in config (e.g. the reader worker gets no write tools). The proxy enforces it too and denies unlisted calls |

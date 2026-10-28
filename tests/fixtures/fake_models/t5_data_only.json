@@ -1,0 +1,13 @@
+{
+  "workers": ["data"],
+  "roles": {
+    "supervisor": [
+      {"tool_calls": [{"name": "ask_data", "args": {"instruction": "Look up Dana Whitfield's department and base salary."}}]},
+      {"content": "Dana Whitfield's 2024 annual bonus is 11340 dollars."}
+    ],
+    "data": [
+      {"tool_calls": [{"name": "read_query", "args": {"query": "SELECT dept, base_salary FROM employees WHERE name = 'Dana Whitfield'"}}]},
+      {"content": "Platform, 94500."}
+    ]
+  }
+}

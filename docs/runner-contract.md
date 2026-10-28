@@ -9,7 +9,7 @@ The host-side runner (`bench/runner.py`) and the in-sandbox entrypoint (`targets
 | `<run>/in/` | `/run/in` | ro | `config.json` (RunConfig), `plan.json` (FaultPlan) |
 | `<run>/out/` | `/run/out` | rw | `result.json` (EntryResult), `traces/<agent>-<server>.jsonl` |
 
-The rootfs is read-only and `/tmp` is a tmpfs (64 MB). No MCP server is rooted outside `/scratch`. The agents have no shell or file tools besides the MCP ones, so they can't reach `/run/out`. This is documented as an assumption in SECURITY.md.
+The rootfs is read-only and `/tmp` is a tmpfs (64 MB). `/scratch` is a bind mount, not tmpfs, so the host can snapshot it after the run; the runner `chmod`s the bind-mounted dirs world-writable because the container UID (10001) differs from the host user. Under Colima, bind sources must live under `$HOME`; the runner uses `.cache/runs/`. No MCP server is rooted outside `/scratch`. The agents have no shell or file tools besides the MCP ones, so they can't reach `/run/out`. This is documented as an assumption in SECURITY.md.
 
 ## Entrypoint
 `python -m mcp_chaos.targets.entry --config /run/in/config.json --out /run/out` with env:
@@ -29,12 +29,12 @@ Exit code 0 means `result.json` was written, whatever the agent outcome. Non-zer
 
 ## Worker allowlists (least privilege)
 Defined in `targets/workers.py`, shared by both frameworks:
-- files: read/list/search/write/edit within `/scratch`; no move or delete outside the manifest-driven task (delete is allowed only because T6 needs it)
+- files: read/list/search/info + `write_file`, `edit_file`, `create_directory`, `move_file` (T6 archives by moving; the server has no delete tool), all rooted at `/scratch`
 - data: `list_tables, describe_table, read_query, write_query`
 - vcs: `git_status, git_log, git_diff*, git_show, git_add, git_commit`; no `git_reset`, `git_checkout`, or branch deletion
 
 ## Network
-The target container sits only on the Docker network `mcpchaos-internal` (`--internal`). A sidecar `mcpchaos-gw` (socat) on that network and the default bridge forwards `gw:8080` to the host gateway. Nothing else is reachable.
+The target container sits only on the Docker network `mcpchaos-internal` (`--internal`). A sidecar `mcpchaos-gw` (socat) on that network and the default bridge forwards `gw:8080` to the host gateway. The gateway listens on `127.0.0.1:<free port>` on the host; the sidecar dials it via the VM's host alias (`host.lima.internal` on Colima) and is recreated if the port changes. Nothing else is reachable.
 
 ## Local mode (no Docker)
 `runner --local` runs the same entrypoint as a host subprocess with the same directory layout under a temp dir, and with upstream commands resolved on the host. It's used by integration tests (fake models, $0) and for development. It is never used for benchmark numbers.

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from mcp_chaos.schemas import (
+    CheckSummary,
     FaultMode,
     FaultPlan,
     FaultSpec,
@@ -154,3 +156,24 @@ def test_run_result_minimal_json_roundtrip() -> None:
         }
     )
     assert RunResult.model_validate_json(r.model_dump_json()) == r
+
+
+def test_run_result_with_check_roundtrip() -> None:
+    cfg = RunConfig(
+        run_id="r",
+        framework="langgraph",
+        task_id="t",
+        fault_plan=FaultPlan(plan_id="p", seed=1, faults=[]),
+        seed=1,
+        budget_usd=1.0,
+    )
+    r = RunResult(
+        run_id="r",
+        config=cfg,
+        status="completed",
+        check=CheckSummary(success=True, details={"n": 1, "ok": [True]}),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        wall_s=1.0,
+    )
+    assert RunResult.model_validate_json(r.model_dump_json()) == r
+    assert r.check is not None and r.check.success

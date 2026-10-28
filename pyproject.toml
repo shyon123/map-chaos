@@ -58,10 +58,11 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers -m 'not live and not quarantine'"
+addopts = "-ra --strict-markers -m 'not live and not quarantine and not docker'"
 markers = [
     "live: calls real LLM APIs (opt-in, costs money)",
     "quarantine: known-flaky, must link an issue",
+    "docker: needs a running Docker daemon and builds the sandbox image (opt-in: -m docker)",
 ]
 
 [tool.coverage.run]

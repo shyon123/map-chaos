@@ -1,0 +1,8 @@
+{
+  "workers": ["data"],
+  "roles": {
+    "supervisor": [
+      {"content": "The bonus is 1 dollar."}
+    ]
+  }
+}

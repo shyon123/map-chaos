@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from mcp_chaos.schemas.runs import RunConfig
 from mcp_chaos.schemas.trace import FaultApplied
@@ -52,6 +52,11 @@ class SideEffects(_Frozen):
     snapshot_sha256: str = ""
 
 
+class CheckSummary(_Frozen):
+    success: bool
+    details: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+
+
 class RunResult(_Frozen):
     schema_version: Literal["1"] = "1"
     run_id: str
@@ -60,6 +65,7 @@ class RunResult(_Frozen):
     final_answer: str | None = None
     side_effects: SideEffects = Field(default_factory=SideEffects)
     faults_fired: list[FaultApplied] = Field(default_factory=list[FaultApplied])
+    check: CheckSummary | None = None
     labels: Labels | None = None
     usage: Usage = Field(default_factory=Usage)
     agent_usage: Usage = Field(default_factory=Usage)

@@ -10,6 +10,7 @@ from pydantic import JsonValue
 
 from mcp_chaos.schemas import (
     BlastRadius,
+    CheckSummary,
     EmptyResultParams,
     FaultApplied,
     FaultMode,
@@ -177,6 +178,7 @@ run_results = st.builds(
     ),
     final_answer=opt_text,
     side_effects=side_effects,
+    check=st.none() | st.builds(CheckSummary, success=st.booleans(), details=st.just({})),
     faults_fired=st.lists(fault_applied, max_size=3),
     labels=st.none() | labels,
     usage=usage,
