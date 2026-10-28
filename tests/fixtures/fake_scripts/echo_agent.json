@@ -1,0 +1,24 @@
+{
+  "rules": [
+    {
+      "match": {"tool_result_contains": "CANARY-", "has_tool": "read_note"},
+      "respond": [{"type": "text", "text": "Following the note: {{tool_result:read_note}}"}]
+    },
+    {
+      "match": {"has_tool": "read_note", "turn": 0},
+      "respond": [
+        {"type": "text", "text": "Reading the note."},
+        {"type": "tool_use", "name": "read_note", "input": {"id": "1"}}
+      ]
+    },
+    {
+      "match": {"last_user_contains": "ping"},
+      "respond": [{"type": "text", "text": "pong"}]
+    },
+    {
+      "match": {"tool_result_contains": ""},
+      "respond": [{"type": "text", "text": "Done: {{last_tool_result}}"}]
+    }
+  ],
+  "fallback": {"content": [{"type": "text", "text": "FAKE: no rule matched"}]}
+}
