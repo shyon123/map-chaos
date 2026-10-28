@@ -12,6 +12,7 @@ from mcp_chaos.schemas import (
     FaultPlan,
     FaultSpec,
     HardeningConfig,
+    ModelConfig,
     PromptInjectionParams,
     RunConfig,
     RunResult,
@@ -110,23 +111,50 @@ def test_schema_version_literal() -> None:
         FaultPlan.model_validate({"plan_id": "p", "seed": 0, "faults": [], "schema_version": "2"})
 
 
-def test_run_id_stable_and_sensitive() -> None:
-    h = HardeningConfig(retry=True)
-    a = derive_run_id("langgraph", "t1", "p1", 7, h)
-    assert a == derive_run_id("langgraph", "t1", "p1", 7, HardeningConfig(retry=True))
-    assert a == RunConfig.derive_run_id("langgraph", "t1", "p1", 7, h)
-    assert len(a) == 16
-    int(a, 16)
-    others = {
-        derive_run_id("agentsdk", "t1", "p1", 7, h),
-        derive_run_id("langgraph", "t2", "p1", 7, h),
-        derive_run_id("langgraph", "t1", "p2", 7, h),
-        derive_run_id("langgraph", "t1", "p1", 8, h),
-        derive_run_id("langgraph", "t1", "p1", 7, None),
-        derive_run_id("langgraph", "t1", "p1", 7, HardeningConfig(retry=True, max_retries=3)),
+def _cfg(**over: Any) -> RunConfig:
+    fields: dict[str, Any] = {
+        "framework": "langgraph",
+        "task_id": "t1",
+        "fault_plan": FaultPlan(
+            plan_id="p1",
+            seed=0,
+            faults=[FaultSpec.model_validate(_spec())],
+        ),
+        "hardening": HardeningConfig(retry=True),
+        "seed": 7,
+        "budget_usd": 1.0,
     }
-    assert a not in others
-    assert len(others) == 6
+    fields.update(over)
+    return RunConfig.with_derived_id(**fields)
+
+
+def test_run_id_stable_and_sensitive() -> None:
+    a = _cfg()
+    assert a.run_id == _cfg().run_id == derive_run_id(a) == a.compute_id()
+    assert len(a.run_id) == 16
+    int(a.run_id, 16)
+    base_plan = a.fault_plan
+    spec = base_plan.faults[0]
+    variants = {
+        "framework": "agentsdk",
+        "task_id": "t2",
+        "seed": 8,
+        "hardening": None,
+        "budget_usd": 2.0,
+        "max_turns": 3,
+        "timeout_s": 5.0,
+        "agent_model": ModelConfig(model="other"),
+        "fault_plan": base_plan.model_copy(
+            update={"faults": [spec.model_copy(update={"params": TimeoutParams(delay_s=6)})]}
+        ),
+    }
+    ids = {a.run_id}
+    for k, v in variants.items():
+        ids.add(_cfg(**{k: v}).run_id)
+    ids.add(_cfg(hardening=HardeningConfig(retry=True, max_retries=3)).run_id)
+    assert len(ids) == len(variants) + 2
+    with pytest.raises(TypeError):
+        RunConfig.with_derived_id(run_id="x", framework="langgraph")
 
 
 def test_hardening_defaults_and_side_effects() -> None:
@@ -139,7 +167,7 @@ def test_hardening_defaults_and_side_effects() -> None:
 def test_run_result_minimal_json_roundtrip() -> None:
     plan = FaultPlan(plan_id="p", seed=1, faults=[])
     cfg = RunConfig(
-        run_id=derive_run_id("langgraph", "t", "p", 1, None),
+        run_id="r",
         framework="langgraph",
         task_id="t",
         fault_plan=plan,

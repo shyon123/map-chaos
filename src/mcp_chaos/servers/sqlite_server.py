@@ -16,6 +16,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -26,6 +27,11 @@ from mcp.server.lowlevel.server import Server
 from mcp.server.stdio import stdio_server
 
 MAX_ROWS = 1000
+MAX_RESULT_BYTES = 1_000_000  # sum of cell sizes returned
+MAX_BLOB_BYTES = 1_000_000  # SQLITE_LIMIT_LENGTH: bounds zeroblob/randomblob/replace/printf
+MAX_VM_STEPS = 5_000_000
+MAX_WALL_S = 5.0  # only bounds a query; never influences its result
+_PROGRESS_EVERY = 1000
 
 _READ_ACTIONS = frozenset(
     {
@@ -69,6 +75,29 @@ def _authorizer(allowed: frozenset[int]) -> Callable[[int, Any, Any, Any, Any], 
         return sqlite3.SQLITE_OK if action in allowed else sqlite3.SQLITE_DENY
 
     return check
+
+
+def _cell_bytes(v: Any) -> int:
+    if isinstance(v, (str, bytes)):
+        return len(v)
+    return 8
+
+
+def _limiter() -> tuple[Callable[[], int], list[bool]]:
+    """Progress handler aborting after MAX_VM_STEPS or MAX_WALL_S; flag set when it fires."""
+    deadline = time.monotonic() + MAX_WALL_S
+    steps = 0
+    fired = [False]
+
+    def handler() -> int:
+        nonlocal steps
+        steps += _PROGRESS_EVERY
+        if steps > MAX_VM_STEPS or time.monotonic() > deadline:
+            fired[0] = True
+            return 1
+        return 0
+
+    return handler, fired
 
 
 def _jsonable(value: Any) -> Any:
@@ -122,25 +151,45 @@ class SqliteTools:
 
     def _run(
         self, query: str, params: list[Any], allowed: frozenset[int], *, write: bool
-    ) -> tuple[list[str], list[Any], int]:
-        """Run exactly one statement under the authorizer in its own transaction."""
+    ) -> tuple[list[str], list[Any], int, bool]:
+        """Run exactly one statement under the authorizer in its own transaction.
+
+        Returns (columns, rows, rows_affected, size_truncated).
+        """
         conn = self._connect(write=write)
+        handler, fired = _limiter()
         try:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_BLOB_BYTES)
             conn.execute("BEGIN")
             conn.set_authorizer(_authorizer(allowed))
+            conn.set_progress_handler(handler, _PROGRESS_EVERY)
+            rows: list[Any] = []
+            size_truncated = False
             try:
                 # Connection.execute rejects multiple statements.
                 cur = conn.execute(query, params)
                 columns = [d[0] for d in cur.description or []]
-                rows = cur.fetchmany(MAX_ROWS + 1) if columns else []
+                total = 0
+                while columns and len(rows) <= MAX_ROWS:
+                    row = cur.fetchone()
+                    if row is None:
+                        break
+                    total += sum(_cell_bytes(v) for v in row)
+                    if total > MAX_RESULT_BYTES:
+                        size_truncated = True
+                        break
+                    rows.append(row)
                 affected = max(cur.rowcount, 0)
             finally:
                 conn.set_authorizer(None)  # COMMIT/ROLLBACK are authorizer-checked too
+                conn.set_progress_handler(None, 0)
             conn.execute("COMMIT")
-            return columns, rows, affected
+            return columns, rows, affected, size_truncated
         except sqlite3.Error as e:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
+            if fired[0]:
+                raise ToolError("query exceeded resource limits") from e
             raise ToolError(_short(e)) from e
         finally:
             conn.close()
@@ -188,8 +237,8 @@ class SqliteTools:
 
     def read_query(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query, params = self._query_args(arguments)
-        columns, rows, _ = self._run(query, params, _READ_ACTIONS, write=False)
-        truncated = len(rows) > MAX_ROWS
+        columns, rows, _, by_size = self._run(query, params, _READ_ACTIONS, write=False)
+        truncated = by_size or len(rows) > MAX_ROWS
         rows = rows[:MAX_ROWS]
         return {
             "columns": columns,
@@ -202,7 +251,7 @@ class SqliteTools:
         if self.read_only:
             raise ToolError("write_query is unavailable in read-only mode")
         query, params = self._query_args(arguments)
-        _, _, affected = self._run(query, params, _WRITE_ACTIONS, write=True)
+        _, _, affected, _ = self._run(query, params, _WRITE_ACTIONS, write=True)
         return {"rows_affected": affected}
 
     # ----- MCP surface -----

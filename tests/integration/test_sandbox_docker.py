@@ -12,7 +12,7 @@ from mcp_chaos.bench import sandbox
 from mcp_chaos.bench.gateway_host import GatewayHost
 from mcp_chaos.bench.runner import run_one
 from mcp_chaos.llm.gateway import GatewayConfig
-from mcp_chaos.schemas import FaultPlan, RunConfig, derive_run_id
+from mcp_chaos.schemas import FaultPlan, RunConfig
 from mcp_chaos.targets.fixtures import build_fixture
 
 pytestmark = pytest.mark.docker
@@ -143,8 +143,7 @@ def test_full_pipeline_in_docker_without_llm(gw: GatewayHost, tmp_path: Path) ->
     """Replay mode with no cassette: the agent's model call is refused by the gateway, so the
     run ends ``agent_error`` -- proving config -> container -> gateway -> result -> check."""
     p = FaultPlan(plan_id="clean", seed=0, faults=[])
-    cfg = RunConfig(
-        run_id=derive_run_id("langgraph", "T5", p.plan_id, 0, None),
+    cfg = RunConfig.with_derived_id(
         framework="langgraph",
         task_id="T5",
         fault_plan=p,

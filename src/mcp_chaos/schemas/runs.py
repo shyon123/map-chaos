@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,23 +36,6 @@ class HardeningConfig(_Frozen):
 Framework = Literal["langgraph", "agentsdk"]
 
 
-def derive_run_id(
-    framework: str,
-    task_id: str,
-    plan_id: str,
-    seed: int,
-    hardening: HardeningConfig | None,
-) -> str:
-    """Stable 16-hex run id; hardening is serialized canonically (None -> "baseline")."""
-    hard = (
-        "baseline"
-        if hardening is None
-        else json.dumps(hardening.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-    )
-    payload = json.dumps([framework, task_id, plan_id, seed, hard], separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
-
-
 class RunConfig(_Frozen):
     schema_version: Literal["1"] = "1"
     run_id: str
@@ -66,13 +49,20 @@ class RunConfig(_Frozen):
     timeout_s: float = Field(default=300, gt=0)
     budget_usd: float = Field(ge=0)
 
+    def compute_id(self) -> str:
+        """16-hex sha256 prefix over the canonical JSON of the whole config except ``run_id``."""
+        body = self.model_dump(mode="json", exclude={"run_id"})
+        payload = json.dumps(body, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
     @classmethod
-    def derive_run_id(
-        cls,
-        framework: str,
-        task_id: str,
-        plan_id: str,
-        seed: int,
-        hardening: HardeningConfig | None,
-    ) -> str:
-        return derive_run_id(framework, task_id, plan_id, seed, hardening)
+    def with_derived_id(cls, **fields: Any) -> RunConfig:
+        """Build a config whose ``run_id`` is derived from every other field."""
+        if "run_id" in fields:
+            raise TypeError("with_derived_id() derives run_id; do not pass it")
+        draft = cls(run_id="", **fields)
+        return draft.model_copy(update={"run_id": draft.compute_id()})
+
+
+def derive_run_id(cfg: RunConfig) -> str:
+    return cfg.compute_id()

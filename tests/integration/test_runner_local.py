@@ -11,9 +11,9 @@ import pytest
 
 from mcp_chaos.bench.cli import _load_env_file, main
 from mcp_chaos.bench.gateway_host import GatewayHost
-from mcp_chaos.bench.runner import RunnerError, run_one
+from mcp_chaos.bench.runner import RunnerError, load_runs, run_one
 from mcp_chaos.llm.gateway import GatewayConfig
-from mcp_chaos.schemas import FaultPlan, RunConfig, RunResult, derive_run_id
+from mcp_chaos.schemas import FaultPlan, RunConfig, RunResult
 from tests.unit.proxy_helpers import injection_spec, plan
 
 MODELS = Path(__file__).resolve().parent.parent / "fixtures" / "fake_models"
@@ -34,8 +34,7 @@ def gw(tmp_path: Path) -> Iterator[GatewayHost]:
 
 def make_cfg(p: FaultPlan | None = None, task: str = "T5", seed: int = 0) -> RunConfig:
     p = p or FaultPlan(plan_id="clean", seed=seed, faults=[])
-    return RunConfig(
-        run_id=derive_run_id("langgraph", task, p.plan_id, seed, None),
+    return RunConfig.with_derived_id(
         framework="langgraph",
         task_id=task,
         fault_plan=p,
@@ -127,6 +126,34 @@ def test_agentsdk_is_harness_error(gw: GatewayHost, tmp_path: Path) -> None:
         cfg, sandbox="local", gw=gw, results_dir=tmp_path / "results", work_root=tmp_path / "w"
     )
     assert r.status == "harness_error"
+
+
+def test_resume_config_drift_raises(
+    gw: GatewayHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = make_cfg(seed=4)
+    go(cfg, gw, tmp_path, "t5_data_only.json", monkeypatch)
+    drifted = cfg.model_copy(update={"max_turns": 99})  # same run_id, different config
+    with pytest.raises(RunnerError, match="drift"):
+        go(drifted, gw, tmp_path, "t5_data_only.json", monkeypatch)
+    assert len(runs(tmp_path / "results")) == 1
+
+
+def test_harness_error_is_rerun_and_superseded(
+    gw: GatewayHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = make_cfg(seed=5)
+    monkeypatch.setenv("MCP_CHAOS_FAKE_MODELS", str(tmp_path / "nope.json"))
+    first = run_one(
+        cfg, sandbox="local", gw=gw, results_dir=tmp_path / "results", work_root=tmp_path / "w"
+    )
+    assert first.status == "harness_error"
+    second = go(cfg, gw, tmp_path, "t5_data_only.json", monkeypatch)
+    assert second.status == "completed"
+    assert len(runs(tmp_path / "results")) == 2  # appended, not rewritten
+    loaded = load_runs(tmp_path / "results" / "runs.jsonl")
+    assert list(loaded) == [cfg.run_id] and loaded[cfg.run_id].status == "completed"
+    assert load_runs(tmp_path / "missing.jsonl") == {}
 
 
 def test_fake_models_refused_in_docker(

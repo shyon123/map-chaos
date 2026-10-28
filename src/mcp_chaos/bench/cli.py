@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from mcp_chaos.log import configure_logging, get_logger
 from mcp_chaos.schemas.faults import FaultPlan
-from mcp_chaos.schemas.runs import Framework, RunConfig, derive_run_id
+from mcp_chaos.schemas.runs import Framework, RunConfig
 
 if TYPE_CHECKING:
     from mcp_chaos.schemas.results import RunResult
@@ -106,8 +106,7 @@ def _load_env_file(path: Path) -> None:
 def _make_cfg(
     framework: Framework, task: str, seed: int, plan: FaultPlan, per_run_usd: float
 ) -> RunConfig:
-    return RunConfig(
-        run_id=derive_run_id(framework, task, plan.plan_id, seed, None),
+    return RunConfig.with_derived_id(
         framework=framework,
         task_id=task,
         fault_plan=plan,

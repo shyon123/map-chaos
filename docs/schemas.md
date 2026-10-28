@@ -33,7 +33,7 @@ class ModelConfig(BaseModel):
     max_tokens: int = 2048
 
 class RunConfig(BaseModel):
-    run_id: str                        # deterministic: hash(framework, task_id, plan_id, seed, hardening)
+    run_id: str                        # deterministic: 16-hex sha256 of canonical JSON of every other field (RunConfig.with_derived_id)
     framework: Literal["langgraph", "agentsdk"]
     task_id: str
     agent_model: ModelConfig

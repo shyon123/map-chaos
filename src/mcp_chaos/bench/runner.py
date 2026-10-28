@@ -41,10 +41,11 @@ class RunnerError(RuntimeError):
     pass
 
 
-def _existing(results_dir: Path, run_id: str) -> RunResult | None:
-    path = results_dir / RUNS_FILE
+def load_runs(path: Path) -> dict[str, RunResult]:
+    """Read ``runs.jsonl``; the last line per run_id wins (re-runs supersede earlier lines)."""
+    out: dict[str, RunResult] = {}
     if not path.is_file():
-        return None
+        return out
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -52,9 +53,20 @@ def _existing(results_dir: Path, run_id: str) -> RunResult | None:
             r = RunResult.model_validate_json(line)
         except ValidationError:
             continue
-        if r.run_id == run_id:
-            return r
-    return None
+        out[r.run_id] = r
+    return out
+
+
+def _existing(results_dir: Path, cfg: RunConfig) -> RunResult | None:
+    """Stored result to reuse, or None to (re-)run. Config drift raises."""
+    r = load_runs(results_dir / RUNS_FILE).get(cfg.run_id)
+    if r is None:
+        return None
+    if r.config != cfg:
+        raise RunnerError(
+            f"run_id {cfg.run_id} collision or config drift: stored config differs from requested"
+        )
+    return None if r.status == "harness_error" else r
 
 
 def _git_sha() -> str:
@@ -176,9 +188,11 @@ def run_one(
 ) -> RunResult:
     """Execute ``cfg`` once and append the ``RunResult`` to ``results_dir/runs.jsonl``.
 
-    Resumable: if the run_id is already in ``runs.jsonl`` the stored result is returned.
+    Resumable: a stored result with an identical config is returned (``harness_error``
+    results are re-run and superseded by appending;
+    a differing stored config raises ``RunnerError``).
     """
-    done = _existing(results_dir, cfg.run_id)
+    done = _existing(results_dir, cfg)
     if done is not None:
         log.info("run_skipped", run_id=cfg.run_id)
         return done

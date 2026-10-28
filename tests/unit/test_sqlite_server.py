@@ -296,3 +296,48 @@ async def test_in_process_roundtrip(db: Path) -> None:
             r = await client.call_tool("read_query", {"query": "SELECT 1"})
             assert r.structured_content is not None
             assert r.structured_content["rows"] == [[1]]
+
+
+@pytest.mark.anyio
+async def test_infinite_recursive_cte_is_aborted(tools: SqliteTools) -> None:
+    q = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c"
+    with anyio.fail_after(8):
+        res = await anyio.to_thread.run_sync(tools.call, "read_query", {"query": q})
+    assert res.is_error
+    assert text(res) == "query exceeded resource limits"
+
+
+def test_wall_time_limit(tools: SqliteTools, monkeypatch: pytest.MonkeyPatch) -> None:
+    import mcp_chaos.servers.sqlite_server as m
+
+    monkeypatch.setattr(m, "MAX_WALL_S", -1.0)
+    res = tools.call(
+        "read_query",
+        {
+            "query": "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<100000) "
+            "SELECT count(*) FROM c"
+        },
+    )
+    assert res.is_error and text(res) == "query exceeded resource limits"
+
+
+@pytest.mark.parametrize("fn", ["zeroblob(1000000000)", "randomblob(1000000000)"])
+def test_huge_blob_rejected(tools: SqliteTools, fn: str) -> None:
+    res = tools.call("read_query", {"query": f"SELECT length({fn})"})
+    assert res.is_error
+    assert "too big" in text(res)
+
+
+def test_large_result_truncated_by_size(tools: SqliteTools) -> None:
+    res = tools.call(
+        "read_query",
+        {
+            "query": "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<50) "
+            "SELECT hex(zeroblob(100000)) FROM c"
+        },
+    )
+    assert not res.is_error, text(res)
+    sc = res.structured_content
+    assert sc is not None and sc["truncated"] is True
+    assert 0 < sc["row_count"] < 50
+    assert sum(len(r[0]) for r in sc["rows"]) <= 1_000_000
