@@ -10,3 +10,4 @@ __pycache__/
 htmlcov/
 .cache/
 dist/
+.claude/worktrees/
