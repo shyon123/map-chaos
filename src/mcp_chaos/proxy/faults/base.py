@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from mcp_chaos.schemas import FaultApplied, FaultMode, FaultSpec
+from mcp_chaos.schemas import FaultApplied, FaultMode, FaultSpec, SchemaDriftParams
 
 
 @dataclass(frozen=True)
@@ -38,3 +39,35 @@ class Fault(Protocol):
 
 
 REGISTRY: dict[FaultMode, Fault] = {}
+
+
+@dataclass(frozen=True)
+class CatalogContext:
+    spec: FaultSpec
+    rng: random.Random
+    tool_call_counts: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class CatalogOutcome:
+    """``tools`` replaces the input array (a vanished tool is simply absent)."""
+
+    tools: list[dict[str, Any]]
+    notify_list_changed: bool = False
+    vanished: frozenset[str] = frozenset()
+    applied: list[FaultApplied] = field(default_factory=lambda: [])
+
+
+class CatalogFault(Protocol):
+    def apply_list(self, ctx: CatalogContext, tools: list[dict[str, Any]]) -> CatalogOutcome: ...
+
+
+CATALOG_REGISTRY: dict[FaultMode, CatalogFault] = {}
+
+
+def is_catalog_spec(spec: FaultSpec) -> bool:
+    """tool_vanish and schema_drift(layer=catalog) act on tools/list; the rest are per-call."""
+    if spec.mode == FaultMode.TOOL_VANISH:
+        return True
+    p = spec.params
+    return isinstance(p, SchemaDriftParams) and p.layer == "catalog"

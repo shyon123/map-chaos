@@ -9,11 +9,18 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from mcp_chaos.proxy.engine import FaultEngine
-from mcp_chaos.proxy.faults.base import REGISTRY, FaultContext
-from mcp_chaos.schemas import TraceEvent
+from mcp_chaos.proxy.faults.base import (
+    CATALOG_REGISTRY,
+    REGISTRY,
+    CatalogContext,
+    FaultContext,
+)
+from mcp_chaos.schemas import FaultApplied, FaultMode, TraceEvent
 
 DENY_CODE = -32001
 DENY_MESSAGE = "tool not allowed by mcp-chaos policy"
+UNKNOWN_TOOL_CODE = -32602
+_LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
 
 
 class Clock(Protocol):
@@ -136,6 +143,8 @@ class ProxyCore:
         self._seq = itertools.count()
         self._pending: dict[tuple[str, int | str], _Pending] = {}
         self._history: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
+        self._completed: dict[str, int] = {}  # tools/call responses delivered, per tool
+        self._vanished: set[str] = set()
 
     def _event(self, **kw: Any) -> Trace:
         return Trace(
@@ -184,6 +193,8 @@ class ProxyCore:
                 allowed = self._allow is None
             if not allowed:
                 return self._deny(obj, name if isinstance(name, str) else None, args_hash)
+            if isinstance(name, str) and name in self._vanished:
+                return self._reject_vanished(obj, name, args_hash)
             if isinstance(name, str) and key is not None:
                 self._pending[key] = _Pending(
                     "tools/call",
@@ -252,28 +263,115 @@ class ProxyCore:
             return [SendToClient(line)]
         if pending.method == "tools/list":
             return self._on_tools_list(line, obj, pending)
-        return self._on_tools_call(line, obj, pending)
+        return self._after_call(pending, self._on_tools_call(line, obj, pending))
 
     def _on_tools_list(self, line: bytes, obj: dict[str, Any], p: _Pending) -> list[Action]:
         out_line, out_obj = line, obj
+        applied: list[FaultApplied] = []
         result: Any = obj.get("result")
-        if self._allow is not None and isinstance(result, dict):
-            tools: Any = cast("dict[str, Any]", result).get("tools")
-            if isinstance(tools, list):
-                items = cast("list[Any]", tools)
-                kept: list[Any] = [
+        rdict = cast("dict[str, Any]", result) if isinstance(result, dict) else {}
+        tools: Any = rdict.get("tools")
+        if isinstance(tools, list):
+            items = cast("list[Any]", tools)
+            kept: list[Any] = items
+            if self._allow is not None:
+                kept = [
                     t
                     for t in items
                     if isinstance(t, dict) and cast("dict[str, Any]", t).get("name") in self._allow
                 ]
-                if len(kept) != len(items):
-                    new_result: dict[str, Any] = {**cast("dict[str, Any]", result), "tools": kept}
-                    out_obj = {**obj, "result": new_result}
-                    out_line = _dumps(out_obj)
+            if self._engine.has_catalog:
+                kept, applied = self._apply_catalog(kept)
+            if len(kept) != len(items) or applied:
+                new_result: dict[str, Any] = {**cast("dict[str, Any]", result), "tools": kept}
+                out_obj = {**obj, "result": new_result}
+                out_line = _dumps(out_obj)
+        fault = applied[0] if applied else None
+        if fault is not None and len(applied) > 1:
+            more: list[Any] = [a.model_dump(mode="json") for a in applied[1:]]
+            fault = fault.model_copy(update={"detail": {**fault.detail, "more": more}})
         return [
-            self._response_event("tools/list", out_obj, p, None, None, None),
+            self._response_event("tools/list", out_obj, p, None, fault, None),
             SendToClient(out_line),
         ]
+
+    # ---------------- catalog faults ----------------
+
+    def _apply_catalog(self, items: list[Any]) -> tuple[list[Any], list[FaultApplied]]:
+        out: list[Any] = []
+        applied: list[FaultApplied] = []
+        for t in items:
+            name: Any = cast("dict[str, Any]", t).get("name") if isinstance(t, dict) else None
+            specs = self._engine.catalog_specs(name) if isinstance(name, str) else []
+            if not specs:
+                out.append(t)
+                continue
+            cur = [cast("dict[str, Any]", t)]
+            for spec in specs:
+                ctx = CatalogContext(spec, self._engine.catalog_rng(name), self._completed)
+                res = CATALOG_REGISTRY[spec.mode].apply_list(ctx, cur)
+                cur = res.tools
+                applied += res.applied
+                self._vanished |= res.vanished
+            out.extend(cur)
+        return out, applied
+
+    def _reject_vanished(
+        self, obj: dict[str, Any], name: str, args_hash: str | None
+    ) -> list[Action]:
+        fa = FaultApplied(
+            fault_id=self._vanish_id(name),
+            mode=FaultMode.TOOL_VANISH,
+            detail={"tool": name, "rejected": True},
+        )
+        actions: list[Action] = [
+            self._event(
+                direction="c2s",
+                method="tools/call",
+                tool=name,
+                args_sha256=args_hash,
+                is_error=True,
+                fault=fa,
+            )
+        ]
+        if "id" in obj:
+            err = {"code": UNKNOWN_TOOL_CODE, "message": f"Unknown tool: {name}"}
+            actions.append(SendToClient(_dumps({"jsonrpc": "2.0", "id": obj["id"], "error": err})))
+        return actions
+
+    def _vanish_id(self, name: str) -> str:
+        for spec in self._engine.catalog_specs(name):
+            if spec.mode == FaultMode.TOOL_VANISH:
+                return spec.id
+        return "tool_vanish"  # pragma: no cover
+
+    def _after_call(self, p: _Pending, actions: list[Action]) -> list[Action]:
+        """Count a delivered tools/call; emit list_changed once when a tool newly vanishes."""
+        tool = p.tool
+        if tool is None or any(isinstance(a, Hang | Crash) for a in actions):
+            return actions
+        self._completed[tool] = self._completed.get(tool, 0) + 1
+        if not self._engine.has_catalog or tool in self._vanished:
+            return actions
+        stub: list[dict[str, Any]] = [{"name": tool}]
+        for spec in self._engine.catalog_specs(tool):
+            if spec.mode != FaultMode.TOOL_VANISH:
+                continue
+            ctx = CatalogContext(spec, self._engine.catalog_rng(tool), self._completed)
+            res = CATALOG_REGISTRY[spec.mode].apply_list(ctx, stub)
+            if tool in res.vanished and res.notify_list_changed:
+                self._vanished.add(tool)
+                return [
+                    *actions,
+                    self._event(
+                        direction="s2c",
+                        method="notifications/tools/list_changed",
+                        tool=tool,
+                        fault=res.applied[0] if res.applied else None,
+                    ),
+                    SendToClient(_dumps(_LIST_CHANGED)),
+                ]
+        return actions
 
     def _response_event(
         self,

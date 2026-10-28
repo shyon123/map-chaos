@@ -7,7 +7,7 @@ import random
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
-from mcp_chaos.proxy.faults.base import REGISTRY
+from mcp_chaos.proxy.faults.base import CATALOG_REGISTRY, REGISTRY, is_catalog_spec
 from mcp_chaos.proxy.faults.discover import load_all
 from mcp_chaos.schemas import FaultPlan, FaultSpec
 
@@ -36,7 +36,13 @@ class Decision:
 
 class FaultEngine:
     def __init__(self, plan: FaultPlan, server: str) -> None:
-        missing = sorted({f.mode.value for f in plan.faults if f.mode not in REGISTRY})
+        missing = sorted(
+            {
+                f.mode.value
+                for f in plan.faults
+                if f.mode not in (CATALOG_REGISTRY if is_catalog_spec(f) else REGISTRY)
+            }
+        )
         if missing:
             raise UnsupportedFaultError(
                 f"no implementation for fault mode(s): {', '.join(missing)}"
@@ -44,6 +50,7 @@ class FaultEngine:
         self.plan = plan
         self.server = server
         self._counts: dict[str, int] = {}
+        self.has_catalog = any(is_catalog_spec(f) for f in plan.faults)
 
     def reserve_index(self, tool: str) -> int:
         """Allocate the next per-tool call index (called at request time)."""
@@ -56,6 +63,8 @@ class FaultEngine:
         rng = derive_rng(self.plan.seed, self.server, tool, idx)
         roll = rng.random()  # always drawn first so the stream is consistent
         for spec in self.plan.faults:
+            if is_catalog_spec(spec):
+                continue
             t = spec.trigger
             if not (fnmatchcase(tool, t.tool) and fnmatchcase(self.server, t.server)):
                 continue
@@ -64,3 +73,16 @@ class FaultEngine:
             if roll < t.probability:
                 return Decision(idx, rng, spec)
         return Decision(idx, rng, None)
+
+    def catalog_specs(self, tool: str) -> list[FaultSpec]:
+        """Catalog-layer specs matching tool + server, plan order (calls/probability ignored)."""
+        return [
+            s
+            for s in self.plan.faults
+            if is_catalog_spec(s)
+            and fnmatchcase(tool, s.trigger.tool)
+            and fnmatchcase(self.server, s.trigger.server)
+        ]
+
+    def catalog_rng(self, tool: str) -> random.Random:
+        return derive_rng(self.plan.seed, self.server, tool, -1)
