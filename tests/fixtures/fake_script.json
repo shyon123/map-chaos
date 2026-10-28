@@ -1,0 +1,50 @@
+{
+  "server_name": "fake",
+  "tools": [
+    {
+      "name": "read_rows",
+      "description": "Return rows from a table.",
+      "input_schema": {"type": "object", "properties": {"table": {"type": "string"}}},
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+              "required": ["id", "name"]
+            }
+          },
+          "count": {"type": "integer"}
+        },
+        "required": ["rows", "count"]
+      },
+      "responses": [
+        {"structured": {"rows": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}], "count": 2}}
+      ]
+    },
+    {
+      "name": "echo",
+      "description": "Echo the arguments back as JSON.",
+      "input_schema": {"type": "object", "additionalProperties": true},
+      "responses": [{"echo_args": true}]
+    },
+    {
+      "name": "flaky",
+      "description": "Fails once, then succeeds.",
+      "input_schema": {"type": "object"},
+      "responses": [
+        {"text": "transient failure", "is_error": true},
+        {"text": "ok"}
+      ],
+      "cycle": false
+    },
+    {
+      "name": "get_doc",
+      "description": "Return a plain text document.",
+      "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}},
+      "responses": [{"text": "The quick brown fox jumps over the lazy dog. Nothing else to see."}]
+    }
+  ]
+}
