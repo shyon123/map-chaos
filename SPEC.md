@@ -113,5 +113,8 @@ Integration: proxy ↔ fake server for every fault mode; runner end-to-end with 
 ## 13. Threats to validity (tracked from day 1)
 Small task set (6), a single model family, temperature-0 non-determinism (we use seeds as repeated trials), the LLM judge's subjectivity (mitigated by κ), our own SQLite server, framework prompt non-equivalence (ADR 0005), and canary injections being weaker than real attacks.
 
-## 14. Open decisions (need the author's OK)
-See the Phase 0 summary. They're resolved here once answered.
+## 14. Decisions (approved 2026-10-28)
+- Name: keep `mcp-chaos`; cite `yashkhou/mcp-chaos`, `dimhold/fault-mcp`, and arXiv 2610.32555 in the README (`docs/prior-art.md`).
+- Budget: default 864-run matrix (§5), `--budget-usd 25` global cap.
+- Models: `claude-haiku-5-5` for supervisor and all workers; judge/red team `claude-sonnet-5-5`.
+- Workflow: develop and commit locally, one commit per slice; push to the author's personal GitHub later with history preserved in order (no squash/rebase of published slices).
