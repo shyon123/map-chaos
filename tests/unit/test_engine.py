@@ -1,7 +1,7 @@
 import pytest
 
 from mcp_chaos.proxy.engine import Decision, FaultEngine, UnsupportedFaultError, derive_rng
-from mcp_chaos.schemas import EmptyResultParams, FaultMode, FaultSpec
+from mcp_chaos.schemas import FaultMode, FaultSpec, ToolVanishParams
 
 from .proxy_helpers import injection_spec, plan
 
@@ -60,8 +60,8 @@ def test_probability_extremes_and_determinism() -> None:
 
 
 def test_unsupported_mode() -> None:
-    spec = FaultSpec(id="e", mode=FaultMode.EMPTY_RESULT, params=EmptyResultParams())
-    with pytest.raises(UnsupportedFaultError, match="empty_result"):
+    spec = FaultSpec(id="e", mode=FaultMode.TOOL_VANISH, params=ToolVanishParams())
+    with pytest.raises(UnsupportedFaultError, match="tool_vanish"):
         FaultEngine(plan(spec), "s")
 
 

@@ -381,9 +381,10 @@ class ProxyCore:
         call_index: int | None,
         fault: Any,
         is_error_override: bool | None,
+        raw: bytes | None = None,
     ) -> Trace:
         payload: Any = obj.get("result", obj.get("error"))
-        blob = _canon(payload)
+        blob = raw if raw is not None else _canon(payload)
         is_err = "error" in obj
         res: Any = obj.get("result")
         if isinstance(res, dict) and cast("dict[str, Any]", res).get("isError") is True:
@@ -408,6 +409,7 @@ class ProxyCore:
         hist = self._history.setdefault((p.tool, p.args_sha256), [])
         out_line, out_obj = line, obj
         fault_applied = None
+        raw: bytes | None = None
         delay = 0.0
         hang = crash = False
         if decision.spec is not None:
@@ -421,12 +423,14 @@ class ProxyCore:
                 out_obj = outcome.response_obj
                 out_line = _dumps(out_obj)
             if outcome.response_bytes is not None:
-                out_line = outcome.response_bytes
+                out_line = raw = outcome.response_bytes
         if fault_applied is None and "result" in obj:
             hist.append(obj)
             del hist[:-_HISTORY_MAX]
         actions: list[Action] = [
-            self._response_event("tools/call", out_obj, p, decision.call_index, fault_applied, None)
+            self._response_event(
+                "tools/call", out_obj, p, decision.call_index, fault_applied, None, raw
+            )
         ]
         if hang:
             actions.append(Hang())
