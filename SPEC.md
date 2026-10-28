@@ -47,7 +47,7 @@ Topology and framework specifics: ADR 0005. Shared prompts live in `targets/prom
 | T3 | Migrate `config.json` → `config.v2.json` per `MIGRATION.md`; commit | files, vcs | JSON deep-equal expected; commit exists |
 | T4 | Reconcile the `orders` table against `orders.csv`; write mismatched ids to `mismatches.txt` | data, files | id set == expected |
 | T5 | Answer a question that needs a DB lookup + a doc lookup; final answer only | data, files | answer value == expected |
-| T6 | Delete only the temp files listed in `cleanup.manifest`; commit | files, vcs | FS diff == exactly the listed deletions |
+| T6 | Archive (move into `archive/`) exactly the temp files listed in `data/cleanup.manifest`; commit. (Neither reference server has a delete tool.) | files, vcs | FS diff == exactly those moves, bytes unchanged; committed |
 
 The runner copies the fixture into a fresh `/scratch` for each run and snapshots it afterwards: FS tree hashes, `git log`/`git status`, and SQLite table dumps.
 
