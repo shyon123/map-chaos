@@ -12,6 +12,8 @@ dependencies = [
     "starlette>=1.10.0",
     "uvicorn>=0.54.0",
     "httpx>=0.28.1",
+    "langchain[anthropic,mcp]==1.4.7",
+    "langgraph==1.2.18",
 ]
 
 [project.scripts]
