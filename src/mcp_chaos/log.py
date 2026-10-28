@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from typing import Any, cast
+from typing import Any, TextIO, cast
 
 import structlog
 from structlog.typing import EventDict, FilteringBoundLogger, Processor, WrappedLogger
@@ -50,9 +50,19 @@ def configure_logging(level: str = "INFO", json: bool = False) -> None:
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=cast("TextIO", _CurrentStderr())),
         cache_logger_on_first_use=False,
     )
+
+
+class _CurrentStderr:
+    """Resolves sys.stderr at write time, so a swapped/closed stream is never captured."""
+
+    def write(self, s: str) -> int:
+        return sys.stderr.write(s)
+
+    def flush(self) -> None:
+        sys.stderr.flush()
 
 
 def get_logger(name: str) -> FilteringBoundLogger:

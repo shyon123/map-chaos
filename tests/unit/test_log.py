@@ -64,3 +64,19 @@ def test_console_mode_debug_level(capsys: pytest.CaptureFixture[str]) -> None:
     assert "visible" in cap.err
     assert "pw" not in cap.err
     assert "[REDACTED]" in cap.err
+
+
+def test_logging_follows_replaced_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import sys
+
+    from mcp_chaos.log import configure_logging, get_logger
+
+    configure_logging()
+    closed = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", closed)
+    closed.close()
+    fresh = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", fresh)
+    get_logger("t").info("still_works")
+    assert "still_works" in fresh.getvalue()

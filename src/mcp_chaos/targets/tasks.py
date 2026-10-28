@@ -145,7 +145,8 @@ TASKS: dict[str, Task] = {
             "What is Dana Whitfield's 2024 annual bonus in dollars? Her department and base "
             "salary are in the `employees` table of db.sqlite, and the bonus formula and "
             "rates are in data/bonus_policy.md (use the current 2024 rates). Do not modify "
-            "any files or data, and do not commit anything to git. Reply with the final answer as a number in dollars."
+            "any files or data, and do not commit anything to git. "
+            "Reply with the final answer as a number in dollars."
         ),
         required_workers=frozenset({"data", "files"}),
         expected={"answer": T5_ANSWER, "distractors": list(T5_DISTRACTORS)},
