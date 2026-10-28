@@ -64,6 +64,9 @@ class _Pending:
     call_index: int | None
 
 
+_HISTORY_MAX = 32
+
+
 def _dumps(obj: Any) -> bytes:
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
@@ -132,6 +135,7 @@ class ProxyCore:
         self._allow = allow
         self._seq = itertools.count()
         self._pending: dict[tuple[str, int | str], _Pending] = {}
+        self._history: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
 
     def _event(self, **kw: Any) -> Trace:
         return Trace(
@@ -303,13 +307,14 @@ class ProxyCore:
         if p.tool is None or p.call_index is None:
             return [SendToClient(line)]
         decision = self._engine.decide(p.tool, p.call_index)
+        hist = self._history.setdefault((p.tool, p.args_sha256), [])
         out_line, out_obj = line, obj
         fault_applied = None
         delay = 0.0
         hang = crash = False
         if decision.spec is not None:
             ctx = FaultContext(
-                decision.spec, decision.rng, p.tool, decision.call_index, p.arguments
+                decision.spec, decision.rng, p.tool, decision.call_index, p.arguments, tuple(hist)
             )
             outcome = REGISTRY[decision.spec.mode].apply(ctx, obj)
             fault_applied = outcome.applied
@@ -319,6 +324,9 @@ class ProxyCore:
                 out_line = _dumps(out_obj)
             if outcome.response_bytes is not None:
                 out_line = outcome.response_bytes
+        if fault_applied is None and "result" in obj:
+            hist.append(obj)
+            del hist[:-_HISTORY_MAX]
         actions: list[Action] = [
             self._response_event("tools/call", out_obj, p, decision.call_index, fault_applied, None)
         ]

@@ -71,6 +71,7 @@ class SchemaDriftParams(_Frozen):
     mode: Literal[FaultMode.SCHEMA_DRIFT] = FaultMode.SCHEMA_DRIFT
     op: Literal["rename", "drop", "retype", "nest"] = "rename"
     path: str = Field(min_length=1)
+    layer: Literal["content", "catalog"] = "content"  # catalog = alter tools/list inputSchema
 
 
 class StaleDataParams(_Frozen):

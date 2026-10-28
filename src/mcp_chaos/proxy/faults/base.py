@@ -16,6 +16,8 @@ class FaultContext:
     tool: str
     call_index: int
     arguments: dict[str, Any] | None
+    # earlier unfaulted responses to the same tool + arguments, oldest first (for stale_data)
+    history: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
