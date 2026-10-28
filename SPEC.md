@@ -86,7 +86,7 @@ Pipeline: ADR 0006. Definitions:
 Gateway: ADR 0003. Defaults: agents `claude-haiku-5-5`, judge `claude-sonnet-5-5` (Batch API), red team `claude-sonnet-5-5`. Prompt caching is on for stable system prompts and tool catalogs. The pinned price table lives in `llm/prices.py` (verify against the pricing page at slice 2). **Rough estimate** (to be re-measured after the slice-2 baseline): ~$0.005–0.02 per Haiku run → 864 runs ≈ $5–20; the judge and red team add ≈ $5. The cap defaults to `--budget-usd 25`.
 
 ## 10. Sandbox
-Docker image `docker/target.Dockerfile`: pinned base digest, Python 3.12 + uv, Node LTS (filesystem server and Agent SDK CLI), UID 10001, `--read-only`, `--tmpfs /scratch:size=64m`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pids-limit=256`, `--memory=1g`, `--cpus=1`, wall-clock kill at `timeout_s`. Network: an internal Docker network whose only reachable host is the gateway. Details: `SECURITY.md`.
+Docker image `docker/target.Dockerfile`: pinned base digest, Python 3.12 + uv, Node LTS (filesystem server and Agent SDK CLI), UID 10001, `--read-only`, `--tmpfs /tmp:size=64m`, `/scratch` as a per-run bind mount (so the host can snapshot it; host-side inspection only ever touches a sanitized copy, see `bench/safe_repo.py`), `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pids-limit=256`, `--memory=1g`, `--cpus=1`, wall-clock kill at `timeout_s`. Network: an internal Docker network whose only reachable host is the gateway. Details: `SECURITY.md`.
 
 ## 11. Testing and quality
 Per CLAUDE.md. Required properties (hypothesis):
