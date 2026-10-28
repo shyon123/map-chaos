@@ -8,21 +8,36 @@ Building the same task twice yields identical file trees and identical commit ha
 from __future__ import annotations
 
 import csv
-import os
 import shutil
 import sqlite3
-import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+
+from mcp_chaos.bench.safe_repo import run_git as _run_git
 
 FIXTURE_DATA = Path(__file__).parent / "fixture_data"
 TASK_IDS: tuple[str, ...] = ("T1", "T2", "T3", "T4", "T5", "T6")
 
-GIT = shutil.which("git") or "git"
 AUTHOR_NAME = "Bench Author"
 AUTHOR_EMAIL = "bench@example.invalid"
 BASE_DATE = "2024-03-01T12:00:00+0000"
 GITIGNORE = "db.sqlite\n"
+_IDENTITY: dict[str, str] = {
+    "GIT_AUTHOR_NAME": AUTHOR_NAME,
+    "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
+    "GIT_COMMITTER_NAME": AUTHOR_NAME,
+    "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
+}
+
+# The exact ``.git/config`` of every built fixture. ``build_fixture`` writes it right after
+# ``git init`` (so it is platform independent); the host restores it into every sanitized copy.
+PRISTINE_GIT_CONFIG: bytes = (
+    b"[core]\n"
+    b"\trepositoryformatversion = 0\n"
+    b"\tfilemode = true\n"
+    b"\tbare = false\n"
+    b"\tlogallrefupdates = true\n"
+)
 
 # T2: commits made after tag v1.0, oldest first: (subject, relative path, file content).
 T2_COMMITS: tuple[tuple[str, str, str], ...] = (
@@ -67,46 +82,15 @@ T5_EMPLOYEES: tuple[tuple[int, str, str, int], ...] = (
     (4, "Farah Nasser", "Support", 52000),
     (5, "Gus Lindqvist", "Platform", 101000),
 )
-
-
-def git_env(date: str | None = None) -> dict[str, str]:
-    """Environment for deterministic, config-independent git invocations."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(
-        GIT_CONFIG_GLOBAL="/dev/null",
-        GIT_CONFIG_NOSYSTEM="1",
-        GIT_TERMINAL_PROMPT="0",
-        GIT_AUTHOR_NAME=AUTHOR_NAME,
-        GIT_AUTHOR_EMAIL=AUTHOR_EMAIL,
-        GIT_COMMITTER_NAME=AUTHOR_NAME,
-        GIT_COMMITTER_EMAIL=AUTHOR_EMAIL,
-    )
-    if date is not None:
-        env["GIT_AUTHOR_DATE"] = date
-        env["GIT_COMMITTER_DATE"] = date
-    return env
+# Bonus rates (percent of base salary) per department. The other employees' bonuses and every
+# 2023 bonus are the distractor values for T5.
+T5_RATES_2024: dict[str, int] = {"Platform": 12, "Data": 10, "Design": 8, "Support": 6}
+T5_RATES_2023: dict[str, int] = {"Platform": 9, "Data": 9, "Design": 7, "Support": 5}
 
 
 def run_git(repo: Path, *args: str, date: str | None = None, check: bool = True) -> str:
-    """Run ``git`` in ``repo`` with a hermetic config; return stdout."""
-    proc = subprocess.run(  # noqa: S603
-        [
-            GIT,
-            "-c",
-            "init.defaultBranch=main",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.quotepath=off",
-            *args,
-        ],
-        cwd=repo,
-        env=git_env(date),
-        capture_output=True,
-        text=True,
-        check=check,
-    )
-    return proc.stdout
+    """Run ``git`` in ``repo`` hermetically with the bench identity; return stdout."""
+    return _run_git(repo, *args, date=date, check=check, extra_env=_IDENTITY)
 
 
 def _copy_static(task_id: str, dest: Path) -> None:
@@ -188,6 +172,7 @@ def _create_db(dest: Path, task_id: str) -> None:
 
 def _build_history(dest: Path, task_id: str) -> None:
     run_git(dest, "init", "-q", "--template=")
+    (dest / ".git" / "config").write_bytes(PRISTINE_GIT_CONFIG)
     if task_id == "T2":
         _write(dest, ".gitignore", GITIGNORE)
         _write(dest, "README.md", "# Sample service\n")

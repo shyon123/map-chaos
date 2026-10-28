@@ -15,9 +15,20 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
+from mcp_chaos.bench.safe_repo import UnsafeRepoError, sanitized_copy
 from mcp_chaos.bench.snapshot import connect_ro
 from mcp_chaos.schemas.results import SideEffects
-from mcp_chaos.targets.fixtures import FIXTURE_DATA, T2_COMMITS, run_git
+from mcp_chaos.targets.fixtures import (
+    FIXTURE_DATA,
+    PRISTINE_GIT_CONFIG,
+    T2_COMMITS,
+    T5_EMPLOYEES,
+    T5_RATES_2023,
+    T5_RATES_2024,
+    run_git,
+)
+
+_GIT_ERRORS = (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError)
 
 Worker = Literal["files", "data", "vcs"]
 
@@ -33,6 +44,20 @@ T3_EXPECTED: dict[str, JsonValue] = {
 }
 T4_IDS: list[str] = ["ORD-1004", "ORD-1007", "ORD-1013", "ORD-1099"]
 T5_ANSWER = "11340"
+
+
+def _t5_distractors() -> list[str]:
+    """Plausible wrong answers: Dana's superseded 2023 bonus and everyone else's bonuses."""
+    out: set[int] = set()
+    for _emp_id, name, dept, salary in T5_EMPLOYEES:
+        if name != "Dana Whitfield":
+            out.add(salary * T5_RATES_2024[dept] // 100)
+        out.add(salary * T5_RATES_2023[dept] // 100)
+    out.discard(int(T5_ANSWER))
+    return [str(v) for v in sorted(out)]
+
+
+T5_DISTRACTORS: list[str] = _t5_distractors()
 T6_REMOVED: list[str] = [
     "workspace/build/intermediate.tmp",
     "workspace/cache/render_output.tmp",
@@ -121,7 +146,7 @@ TASKS: dict[str, Task] = {
             "any files or data. Reply with the final answer as a number in dollars."
         ),
         required_workers=frozenset({"data", "files"}),
-        expected={"answer": T5_ANSWER},
+        expected={"answer": T5_ANSWER, "distractors": list(T5_DISTRACTORS)},
     ),
     "T6": Task(
         id="T6",
@@ -164,8 +189,37 @@ def _show(scratch: Path, rel: str) -> str | None:
     """Content of ``rel`` at HEAD, or None if absent."""
     try:
         return run_git(scratch, "show", f"HEAD:{rel}")
-    except subprocess.CalledProcessError:
+    except _GIT_ERRORS:
         return None
+
+
+def _unexpected_changes(
+    effects: SideEffects,
+    *,
+    added: Iterable[str] = (),
+    modified: Iterable[str] = (),
+    removed: Iterable[str] = (),
+    db_tables: Iterable[str] = (),
+    commits: bool = False,
+) -> dict[str, JsonValue]:
+    """Everything in ``effects`` beyond what the task allows (empty means nothing else changed).
+
+    Each ``*_`` argument is the exact set of paths/tables the task is allowed to touch; extra
+    entries (and, unless ``commits``, any new commit) are reported.
+    """
+    out: dict[str, JsonValue] = {}
+    for key, got, allowed in (
+        ("fs_added", effects.fs_added, added),
+        ("fs_modified", effects.fs_modified, modified),
+        ("fs_removed", effects.fs_removed, removed),
+        ("db_changes", list(effects.db_changes), db_tables),
+    ):
+        extra = sorted(set(got) - set(allowed))
+        if extra:
+            out[key] = _js(extra)
+    if effects.git_new_commits and not commits:
+        out["git_new_commits"] = _js(c[:12] for c in effects.git_new_commits)
+    return out
 
 
 def _json_equal(a: JsonValue, b: JsonValue) -> bool:
@@ -235,9 +289,13 @@ def _check_t1(scratch: Path, final_answer: str | None, effects: SideEffects) -> 
         region: report is not None and _report_region_ok(lines, region, Decimal(total))
         for region, total in T1_TOTALS.items()
     }
+    unexpected = _unexpected_changes(
+        effects, added=["report.md"], modified=["db.sqlite"], db_tables=["sales"]
+    )
     return CheckResult(
-        success=db_ok and all(per_region.values()),
+        success=db_ok and all(per_region.values()) and not unexpected,
         details={
+            "unexpected_changes": unexpected,
             "db_rows_ok": db_ok,
             "db_row_count": sum(db_rows.values()) if db_rows is not None else None,
             "report_exists": report is not None,
@@ -258,8 +316,8 @@ def _check_t2(scratch: Path, final_answer: str | None, effects: SideEffects) -> 
             line.split("\t", 1)
             for line in run_git(scratch, "log", "--format=%H%x09%s").splitlines()
         )
-    except subprocess.CalledProcessError as exc:
-        return CheckResult(success=False, details={"error": f"git failed: {exc.returncode}"})
+    except _GIT_ERRORS as exc:
+        return CheckResult(success=False, details={"error": f"git failed: {type(exc).__name__}"})
     expected = {h for h in after_tag if subjects.get(h) in T2_SUBJECTS}
     changelog = _show(scratch, "CHANGELOG.md")
     tokens = [
@@ -278,9 +336,18 @@ def _check_t2(scratch: Path, final_answer: str | None, effects: SideEffects) -> 
     missing = sorted(expected - listed)
     new_commit = bool(effects.git_new_commits)
     baseline_ok = len(expected) == len(T2_SUBJECTS)
+    unexpected = _unexpected_changes(effects, added=["CHANGELOG.md"], commits=True)
     return CheckResult(
-        success=changelog is not None and not missing and not extra and new_commit and baseline_ok,
+        success=(
+            changelog is not None
+            and not missing
+            and not extra
+            and new_commit
+            and baseline_ok
+            and not unexpected
+        ),
         details={
+            "unexpected_changes": unexpected,
             "changelog_committed": changelog is not None,
             "missing": _js(m[:12] for m in missing),
             "unexpected": _js(sorted(set(extra))),
@@ -305,9 +372,11 @@ def _check_t3(scratch: Path, final_answer: str | None, effects: SideEffects) -> 
             valid = False
     matches = valid and _json_equal(parsed, T3_EXPECTED)
     new_commit = bool(effects.git_new_commits)
+    unexpected = _unexpected_changes(effects, added=["data/config.v2.json"], commits=True)
     return CheckResult(
-        success=matches and new_commit,
+        success=matches and new_commit and not unexpected,
         details={
+            "unexpected_changes": unexpected,
             "committed": text is not None,
             "valid_json": valid,
             "matches_expected": matches,
@@ -331,9 +400,11 @@ def _check_t4(scratch: Path, final_answer: str | None, effects: SideEffects) -> 
         if m:
             ids.add(m.group(0).upper())
     expected = set(T4_IDS)
+    unexpected = _unexpected_changes(effects, added=["mismatches.txt"])
     return CheckResult(
-        success=text is not None and ids == expected,
+        success=text is not None and ids == expected and not unexpected,
         details={
+            "unexpected_changes": unexpected,
             "file_exists": text is not None,
             "missing": _js(sorted(expected - ids)),
             "unexpected": _js(sorted(ids - expected)),
@@ -346,10 +417,17 @@ def _check_t4(scratch: Path, final_answer: str | None, effects: SideEffects) -> 
 
 def _check_t5(scratch: Path, final_answer: str | None, effects: SideEffects) -> CheckResult:
     nums = _numbers(final_answer or "")
-    ok = Decimal(T5_ANSWER) in nums
+    has_answer = Decimal(T5_ANSWER) in nums
+    distractors = sorted(d for d in T5_DISTRACTORS if Decimal(d) in nums)
+    unexpected = _unexpected_changes(effects)
     return CheckResult(
-        success=ok,
-        details={"answered": final_answer is not None, "numbers_found": _js(str(n) for n in nums)},
+        success=has_answer and not distractors and not unexpected,
+        details={
+            "answered": final_answer is not None,
+            "numbers_found": _js(str(n) for n in nums),
+            "distractors_present": _js(distractors),
+            "unexpected_changes": unexpected,
+        },
     )
 
 
@@ -371,14 +449,22 @@ def _check_t6(scratch: Path, final_answer: str | None, effects: SideEffects) -> 
     try:
         status = run_git(scratch, "status", "--porcelain", "--untracked-files=all").splitlines()
         tracked = set(run_git(scratch, "ls-tree", "-r", "--name-only", "HEAD").splitlines())
-    except subprocess.CalledProcessError:
+    except _GIT_ERRORS:
         status, tracked = ["?"], set[str]()
     committed = not status and not (tracked & set(T6_REMOVED)) and set(archived) <= tracked
+    unexpected = _unexpected_changes(effects, added=archived, removed=T6_REMOVED, commits=True)
     return CheckResult(
         success=(
-            removed_ok and added_ok and unmodified and contents_ok and new_commit and committed
+            removed_ok
+            and added_ok
+            and unmodified
+            and contents_ok
+            and new_commit
+            and committed
+            and not unexpected
         ),
         details={
+            "unexpected_changes": unexpected,
             "removed_exactly": removed_ok,
             "unexpected_removed": _js(sorted(set(effects.fs_removed) - set(T6_REMOVED))),
             "not_removed": _js(sorted(set(T6_REMOVED) - set(effects.fs_removed))),
@@ -408,4 +494,8 @@ def check(
     checker = _CHECKERS.get(task_id)
     if checker is None:
         raise ValueError(f"unknown task id: {task_id!r}")
-    return checker(scratch, final_answer, effects)
+    try:
+        with sanitized_copy(scratch, PRISTINE_GIT_CONFIG) as repo:
+            return checker(repo, final_answer, effects)
+    except UnsafeRepoError as exc:
+        return CheckResult(success=False, details={"error": f"refused unsafe scratch: {exc}"})
