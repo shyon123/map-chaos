@@ -139,6 +139,37 @@ def test_self_test_starts_all_servers_and_reaches_gateway(
     assert all(w == {"missing": []} for w in report["workers"].values())
 
 
+def test_agentsdk_self_test_runs_bundled_cli_in_sandbox(
+    gw: GatewayHost, dirs: tuple[Path, Path, Path]
+) -> None:
+    """The Claude Code CLI bundled in the SDK wheel starts under the locked-down container
+    (read-only rootfs, uid 10001, tmpfs state dir) and launches all three proxied MCP servers."""
+    scratch, _, out = dirs
+    build_fixture("T1", scratch)
+    for p in [scratch, *scratch.rglob("*")]:
+        p.chmod(0o777 if p.is_dir() else 0o666)
+    r = probe(
+        dirs,
+        "",
+        entrypoint="python",
+        args=[
+            "-m",
+            "mcp_chaos.targets.entry",
+            "--self-test",
+            "--framework",
+            "agentsdk",
+            "--out",
+            "/run/out",
+        ],
+    )
+    assert r.exit_code == 0, r.stderr_tail + r.stdout_tail
+    report = json.loads((out / "selftest.json").read_text())
+    assert report["ok"] is True, report
+    assert report["gateway_status"] == 404
+    assert set(report["workers"]) == {"files", "data", "vcs"}
+    assert all(w == {"status": "connected", "missing": []} for w in report["workers"].values())
+
+
 def test_full_pipeline_in_docker_without_llm(gw: GatewayHost, tmp_path: Path) -> None:
     """Replay mode with no cassette: the agent's model call is refused by the gateway, so the
     run ends ``agent_error`` -- proving config -> container -> gateway -> result -> check."""

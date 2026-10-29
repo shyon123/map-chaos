@@ -9,6 +9,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+import claude_agent_sdk
 import pytest
 
 from mcp_chaos.bench import runner
@@ -123,7 +124,11 @@ def test_missing_result_is_harness_error(
     assert r.status == "harness_error" and r.check is None
 
 
-def test_agentsdk_is_harness_error(gw: GatewayHost, tmp_path: Path) -> None:
+@pytest.mark.skipif(
+    not (Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude").is_file(),
+    reason="no bundled Claude Code CLI in this claude-agent-sdk wheel",
+)
+def test_agentsdk_replay_miss_is_agent_error(gw: GatewayHost, tmp_path: Path) -> None:
     cfg = RunConfig.with_derived_id(
         framework="agentsdk",
         task_id="T5",
@@ -136,7 +141,9 @@ def test_agentsdk_is_harness_error(gw: GatewayHost, tmp_path: Path) -> None:
     r = run_one(
         cfg, sandbox="local", gw=gw, results_dir=tmp_path / "results", work_root=tmp_path / "w"
     )
-    assert r.status == "harness_error"
+    # the bundled CLI ran; the replay gateway has no cassette for its request
+    assert r.status == "agent_error"
+    assert r.check is not None and not r.check.success
 
 
 def test_resume_config_drift_raises(

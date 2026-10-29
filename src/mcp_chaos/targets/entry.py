@@ -26,8 +26,17 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError
 
 from mcp_chaos.log import configure_logging, get_logger
 from mcp_chaos.schemas.faults import FaultPlan
-from mcp_chaos.schemas.runs import RunConfig
-from mcp_chaos.targets.langgraph_target.graph import ModelFactory, run_langgraph
+from mcp_chaos.schemas.runs import Framework, RunConfig
+from mcp_chaos.targets.agentsdk_target.run import (
+    AgentSdkOutcome,
+    agentsdk_self_test,
+    run_agentsdk,
+)
+from mcp_chaos.targets.langgraph_target.graph import (
+    LangGraphOutcome,
+    ModelFactory,
+    run_langgraph,
+)
 from mcp_chaos.targets.langgraph_target.mcp_tools import worker_tools
 from mcp_chaos.targets.tasks import TASKS
 from mcp_chaos.targets.workers import WORKERS, WorkerName, proxy_cmd, upstream_cmd
@@ -157,7 +166,7 @@ def _load_config(config_path: Path) -> tuple[RunConfig, Path]:
 
 async def run_entry(config_path: Path, out: Path) -> EntryResult:
     cfg, plan_path = _load_config(config_path)
-    if cfg.framework != "langgraph":
+    if cfg.framework not in ("langgraph", "agentsdk"):
         raise HarnessError(f"framework {cfg.framework!r} is not implemented")
     task = TASKS.get(cfg.task_id)
     if task is None:
@@ -171,7 +180,11 @@ async def run_entry(config_path: Path, out: Path) -> EntryResult:
             workers = only
     cmds = build_cmds(cfg, plan_path, out, workers)
     t0 = time.monotonic()
-    outcome = await run_langgraph(task.prompt, cfg, cmds, model_factory=factory)
+    outcome: LangGraphOutcome | AgentSdkOutcome
+    if cfg.framework == "agentsdk":
+        outcome = await run_agentsdk(task.prompt, cfg, cmds, env=os.environ)
+    else:
+        outcome = await run_langgraph(task.prompt, cfg, cmds, model_factory=factory)
     return EntryResult(
         run_id=cfg.run_id,
         status=outcome.status,
@@ -182,14 +195,18 @@ async def run_entry(config_path: Path, out: Path) -> EntryResult:
     )
 
 
-async def run_self_test(out: Path) -> dict[str, Any]:
-    """Start every MCP server through the proxy and probe the gateway (no LLM call)."""
+async def run_self_test(out: Path, framework: Framework = "langgraph") -> dict[str, Any]:
+    """Start every MCP server through the proxy and probe the gateway (no LLM call).
+
+    For ``agentsdk`` the servers are started by the bundled Claude Code CLI itself, which proves
+    the CLI binary runs in this sandbox (read-only rootfs, tmpfs state dir).
+    """
     plan = FaultPlan(plan_id="selftest", seed=0, faults=[])
     plan_path = out / "selftest-plan.json"
     _write_atomic(plan_path, plan.model_dump_json())
     cfg = RunConfig(
         run_id="selftest",
-        framework="langgraph",
+        framework=framework,
         task_id="T1",
         fault_plan=plan,
         seed=0,
@@ -198,17 +215,25 @@ async def run_self_test(out: Path) -> dict[str, Any]:
     names: list[WorkerName] = list(WORKERS)
     cmds = build_cmds(cfg, plan_path, out, names)
     report: dict[str, Any] = {"workers": {}, "gateway_status": None, "ok": True}
-    for name in names:
+    if framework == "agentsdk":
         try:
-            with anyio.fail_after(60):
-                async with worker_tools(WORKERS[name], cmds[name]) as tools:
-                    have = {t.name for t in tools}
-            missing = sorted(WORKERS[name].allow - have)
-            report["workers"][name] = {"missing": missing}
-            report["ok"] = report["ok"] and not missing
+            sub = await agentsdk_self_test(cfg, cmds, os.environ)
+            report["workers"], report["ok"] = sub["workers"], sub["ok"]
         except Exception as e:
-            report["workers"][name] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+            report["workers"]["agentsdk"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
             report["ok"] = False
+    else:
+        for name in names:
+            try:
+                with anyio.fail_after(60):
+                    async with worker_tools(WORKERS[name], cmds[name]) as tools:
+                        have = {t.name for t in tools}
+                missing = sorted(WORKERS[name].allow - have)
+                report["workers"][name] = {"missing": missing}
+                report["ok"] = report["ok"] and not missing
+            except Exception as e:
+                report["workers"][name] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+                report["ok"] = False
     base = os.environ.get("ANTHROPIC_BASE_URL", "")
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -233,6 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", type=Path, default=Path("/run/in/config.json"))
     p.add_argument("--out", type=Path, default=Path("/run/out"))
     p.add_argument("--self-test", action="store_true")
+    p.add_argument("--framework", choices=["langgraph", "agentsdk"], default="langgraph")
     return p
 
 
@@ -242,7 +268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     out: Path = args.out
     try:
         if args.self_test:
-            report = anyio.run(run_self_test, out)
+            report = anyio.run(run_self_test, out, args.framework)
             _write_atomic(out / "selftest.json", json.dumps(report))
             return 0 if report["ok"] else 1
         result = anyio.run(run_entry, args.config, out)
