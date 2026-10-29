@@ -14,6 +14,9 @@ dependencies = [
     "httpx>=0.28.1",
     "langchain[anthropic,mcp]==1.4.7",
     "langgraph==1.2.18",
+    "claude-agent-sdk==0.2.174",
+    "jsonschema>=4.26,<5",
+    "matplotlib>=3.11,<4",
 ]
 
 [project.scripts]
