@@ -149,5 +149,5 @@ class FaultPlan(_Frozen):
     plan_id: str
     seed: int
     faults: list[FaultSpec]  # first matching fault wins per call
-    source: Literal["static", "redteam"] = "static"
+    source: Literal["static", "redteam", "random"] = "static"
     parent_plan_id: str | None = None

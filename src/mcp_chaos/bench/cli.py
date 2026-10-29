@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from mcp_chaos.judge import cli as judge_cli
 from mcp_chaos.log import configure_logging, get_logger
+from mcp_chaos.redteam import cli as redteam_cli
 from mcp_chaos.schemas.faults import FaultPlan
 from mcp_chaos.schemas.runs import Framework, RunConfig
 
@@ -66,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     register(sub)
     judge_cli.register(sub)
+    redteam_cli.register(sub)
     return parser
 
 
