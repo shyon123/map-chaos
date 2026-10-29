@@ -86,8 +86,18 @@ def test_p3_malformed_content(resp: dict[str, Any], variant: str, seed: int) -> 
     text = out.response_obj["result"]["content"][idx]["text"]
     # P3: valid JSON, or the trace says it is not
     assert out.applied.parseable is valid(text)
-    if variant != "wrong_type":
+    original = resp["result"]["content"][idx]["text"]
+    # corrupting a JSON object/array must break it; plain text may truncate into a valid JSON
+    # scalar (e.g. "0000" -> "0"), which P3 allows because the trace reports it as parseable
+    if variant != "wrong_type" and _is_container(original):
         assert out.applied.parseable is False
+
+
+def _is_container(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), dict | list)
+    except ValueError:
+        return False
 
 
 drift_ops = st.sampled_from(["rename", "drop", "retype", "nest"])

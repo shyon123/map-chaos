@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict
 
 from mcp_chaos.log import get_logger
 from mcp_chaos.schemas.runs import RunConfig
-from mcp_chaos.targets.workers import WORKERS, WorkerSpec
+from mcp_chaos.targets.workers import WORKERS, WorkerSpec, system_prompt
 
 log = get_logger(__name__)
 
@@ -143,10 +143,6 @@ def tool_names(worker: WorkerSpec) -> list[str]:
     return [f"mcp__{entry_name(worker)}__{t}" for t in sorted(worker.allow)]
 
 
-def _load_prompt(name: str, scratch: str) -> str:
-    return (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8").replace("{scratch}", scratch)
-
-
 def _server_env(env: Mapping[str, str]) -> dict[str, str]:
     return {
         k: v for k, v in env.items() if k in _SERVER_ENV_KEYS or k.startswith(_SERVER_ENV_PREFIXES)
@@ -200,14 +196,14 @@ def build_options(
         allowed.extend(tools)
         agents[name] = AgentDefinition(
             description=DESCRIPTIONS[name],
-            prompt=_load_prompt(name, scratch),
+            prompt=system_prompt(name, cfg.hardening, scratch=scratch),
             tools=tools,
             model=model,
             maxTurns=cfg.max_turns,
         )
     agents[SUPERVISOR] = AgentDefinition(
         description="Coordinates the workers to complete the task.",
-        prompt=_load_prompt("supervisor_agentsdk", scratch),
+        prompt=system_prompt("supervisor_agentsdk", cfg.hardening, scratch=scratch),
         tools=[f"{DELEGATE_TOOL}({','.join(n for n in WORKERS if n in cmds)})"],
         model=model,
     )

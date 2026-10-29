@@ -392,3 +392,15 @@ def test_error_helpers() -> None:
     assert prog.turns == 3  # no per-message data: fall back to the CLI's count
     out = AgentSdkOutcome(final_answer=None, turns=0, error="x", status="agent_error")
     assert out.cost_usd is None
+
+
+def test_hardening_addendum_reaches_every_agent_prompt() -> None:
+    from mcp_chaos.schemas import HardeningConfig
+    from mcp_chaos.targets.agentsdk_target import run as sdk_run
+    from mcp_chaos.targets.workers import ADDENDUM_FILE, PROMPTS_DIR
+
+    addendum = (PROMPTS_DIR / ADDENDUM_FILE).read_text("utf-8").strip().splitlines()[0]
+    for role in ("files", "data", "vcs", "supervisor_agentsdk"):
+        hardened = sdk_run.system_prompt(role, HardeningConfig(prompt_addendum=True))
+        assert addendum in hardened
+        assert addendum not in sdk_run.system_prompt(role, None)
