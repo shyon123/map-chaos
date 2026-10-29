@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
 import sys
 import time
 from collections.abc import Sequence
@@ -115,8 +117,25 @@ def _need[T](x: T | None) -> T:
     return x
 
 
+def _pollable(fd: int) -> bool:
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError:
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode)
+
+
 async def _read_fd(fd: int) -> bytes:
-    return await anyio.to_thread.run_sync(os.read, fd, _CHUNK, abandon_on_cancel=True)
+    if not _pollable(fd):
+        # regular files never block: a worker thread is fine and cannot hang shutdown
+        return await anyio.to_thread.run_sync(os.read, fd, _CHUNK, abandon_on_cancel=True)
+    # pipes/sockets/ttys: non-blocking read, cancellable with no worker thread to join
+    os.set_blocking(fd, False)
+    while True:
+        try:
+            return os.read(fd, _CHUNK)
+        except BlockingIOError:
+            await anyio.wait_readable(fd)
 
 
 async def _terminate(proc: Process) -> None:
@@ -141,11 +160,16 @@ async def run_relay(
     out: IO[bytes] | None = None,
 ) -> int:
     await anyio.Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
+    was_blocking = True
+    with contextlib.suppress(OSError):
+        was_blocking = os.get_blocking(stdin_fd)
     async with await anyio.open_file(trace_path, "a", encoding="utf-8") as trace:
         proc = await anyio.open_process(list(cmd), stdin=-1, stdout=-1, stderr=-1)
         try:
             return await _relay(core, proc, trace, server, stdin_fd, out)
         finally:
+            with contextlib.suppress(OSError):
+                os.set_blocking(stdin_fd, was_blocking)
             with anyio.CancelScope(shield=True):
                 if proc.returncode is None:
                     proc.kill()
