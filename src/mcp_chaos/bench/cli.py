@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--limit", type=int, default=None, help="run only the first N runs")
     m.add_argument("--dry-run", action="store_true", help="print matrix size and cost; spend $0")
     m.add_argument("--yes", action="store_true", help="confirm live/record spending")
+    from mcp_chaos.bench.scorecard import register
+
+    register(sub)
     return parser
 
 
@@ -301,6 +304,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
+    if getattr(args, "func", None) is not None:
+        return int(args.func(args))
     if args.command == "proxy":
         return _run_proxy(args, upstream)
     if args.command == "run-one":
