@@ -50,6 +50,9 @@ class RunnerError(RuntimeError):
     pass
 
 
+_RUNS_LOCK = threading.Lock()
+
+
 def load_runs(path: Path) -> dict[str, RunResult]:
     """Read ``runs.jsonl``; the last line per run_id wins (re-runs supersede earlier lines)."""
     out: dict[str, RunResult] = {}
@@ -412,7 +415,13 @@ def _persist(results_dir: Path, result: RunResult, out: Path) -> None:
     if (out / "traces").is_dir():
         shutil.copytree(out / "traces", dest, dirs_exist_ok=True)
     line = json.dumps(json.loads(result.model_dump_json()), separators=(",", ":")) + "\n"
-    with (results_dir / RUNS_FILE).open("a", encoding="utf-8") as f:
-        f.write(line)
-        f.flush()
-        os.fsync(f.fileno())
+    data = line.encode("utf-8")
+    with _RUNS_LOCK:  # concurrent run threads: one whole line per write, never interleaved
+        fd = os.open(results_dir / RUNS_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)

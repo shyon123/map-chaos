@@ -122,7 +122,8 @@ def _pollable(fd: int) -> bool:
         mode = os.fstat(fd).st_mode
     except OSError:
         return False
-    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode)
+    # not ttys: a SIGKILLed proxy would leave a shared terminal in O_NONBLOCK
+    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
 
 
 async def _read_fd(fd: int) -> bytes:

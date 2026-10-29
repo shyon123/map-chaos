@@ -4,7 +4,9 @@
 # call to each tool (calls [0]) with probability 1. Every run is therefore exposed early, and a
 # retry (call index 1) is clean, so retry/validation hardening can matter.
 # Exceptions, each deliberate:
-#   F06 stale_data   calls [1]: the replay needs an earlier response, so the 2nd call is stale.
+#   F06 stale_data   any call: replays the previous response to the SAME tool+arguments, so it
+#                    fires only on repeated identical calls (e.g. re-reading after a write).
+#                    Scorecards condition on faults_fired; expect a lower firing rate here.
 #   F11 tool_vanish  calls [0], after_calls 1: the tool disappears after its first call.
 #   F05-content      renames `rows`, which only exists in the sqlite server's read_query output;
 #                    other servers' results lack the path and pass through unchanged.
@@ -67,7 +69,7 @@ cells:
       - id: F06
         mode: stale_data
         params: {lag_calls: 1}
-        trigger: {server: "*", tool: "*", calls: [1], probability: 1}
+        trigger: {server: "*", tool: "*", probability: 1}
 
   - name: F07-oversized_output
     faults:

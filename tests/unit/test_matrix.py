@@ -81,7 +81,7 @@ def test_cells_yaml_validates_and_covers_every_mode() -> None:
         assert len(c.faults) == 1
         t = c.faults[0].trigger
         assert (t.server, t.tool, t.probability) == ("*", "*", 1.0)
-        assert t.calls == ([1] if c.faults[0].mode is FaultMode.STALE_DATA else [0])
+        assert t.calls == (None if c.faults[0].mode is FaultMode.STALE_DATA else [0])
     templates = {
         getattr(f.params, "template_id", None)
         for c in cells
