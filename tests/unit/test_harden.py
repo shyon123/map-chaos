@@ -348,3 +348,46 @@ def test_incomplete_results_pass_through() -> None:
     assert transform_response(cfg, obj) == (obj, [])
     done = ok_resp(resultType="complete", structuredContent={"rows": [], "count": 0})
     assert validate.validate_tool_response(done, SCHEMA) == []
+
+
+def test_filter_result_f08_field_position_quarantined_and_validates() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "rows": {"type": "array"},
+            "count": {"type": "integer"},
+            "z": {"type": "string"},
+        },
+        "required": ["rows", "count"],
+    }
+    payload = render_template("echo_in_answer", "CANARY-f08")
+    sc = {"rows": [{"name": "a " + payload, "id": 1}], "count": 1, "z": "tail"}
+    mirror = json.dumps(sc, sort_keys=True, separators=(",", ":"))
+    res = {"content": [{"type": "text", "text": mirror}], "structuredContent": sc}
+    out, findings = inject_filter.filter_result(res)
+    assert findings
+    assert "CANARY-f08" not in json.dumps(out)
+    new_sc = out["structuredContent"]
+    assert not json.dumps(new_sc).startswith("<tool_output")
+    assert "<tool_output" not in json.dumps(new_sc)
+    assert new_sc["rows"][0]["id"] == 1 and new_sc["count"] == 1 and new_sc["z"] == "tail"
+    assert "removed" in new_sc["rows"][0]["name"]
+    assert validate.check_output_schema(out, schema) == []
+    mirror_out = out["content"][0]["text"]
+    assert mirror_out.startswith("<tool_output")
+    body = mirror_out.split("\n", 1)[1].rsplit("\n</tool_output>", 1)[0]
+    assert json.loads(body) == new_sc
+
+
+def test_read_only_tools_match_worker_allowlists() -> None:
+    from mcp_chaos.harden.config import READ_ONLY_TOOLS
+    from mcp_chaos.targets.workers import WORKERS
+
+    allowed = frozenset().union(*(w.allow for w in WORKERS.values()))
+    writes = {
+        "write_query", "write_file", "edit_file", "move_file",
+        "create_directory", "git_add", "git_commit",
+    }  # fmt: skip
+    assert allowed >= READ_ONLY_TOOLS
+    assert not (READ_ONLY_TOOLS & writes)
+    assert allowed - READ_ONLY_TOOLS == writes

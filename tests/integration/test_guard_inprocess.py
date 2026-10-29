@@ -126,6 +126,9 @@ def cfg(retry: bool = False, **kw: Any) -> GuardConfig:
         breaker_threshold=kw.pop("breaker_threshold", 2),
         breaker_cooldown_s=kw.pop("breaker_cooldown_s", 0.5),
         seed=1,
+        retry_tools=frozenset(
+            kw.pop("retry_tools", {"rows", "w", "slow", "noisy", "a", "b", "big", "inj", "err"})
+        ),
     )
 
 
@@ -237,6 +240,123 @@ async def test_hang_recovered_by_retry(tmp_path: Path) -> None:
     assert ev[0]["detail"]["guard_action"] == "retried"
     assert ev[0]["detail"]["n"] == 1 and ev[0]["detail"]["kind"] == "deadline"
     assert ev[0]["direction"] == "s2c" and ev[0]["tool"] == "rows"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fault", ["hang", "garbage", "late:1.0"])
+async def test_write_tool_never_retried(tmp_path: Path, fault: str) -> None:
+    s = Session(
+        tmp_path,
+        cfg(retry=True, deadline_s=0.3),
+        {"write_query": [fault, "ok"], "read_query": [fault, "ok"]},
+    )
+
+    async def body(s: Session) -> None:
+        s.send(call(1, "write_query"))
+        await s.wait_for(1)
+        await anyio.sleep(0.2)
+        s.send(call(2, "read_query"))
+        await s.wait_for(2)
+        await anyio.sleep(0.8)
+
+    await run_session(s, body)
+    r = s.replies()
+    assert r[1]["result"]["isError"] is True
+    assert "outcome unknown" in text_of(r[1]) and "verify state" in text_of(r[1])
+    assert s.upstream_counts()["write_query"] == 1
+
+
+@pytest.mark.anyio
+async def test_read_tool_still_retried_default_allowlist(tmp_path: Path) -> None:
+    c = GuardConfig(
+        hardening=HardeningConfig(retry=True, max_retries=2),
+        deadline_s=0.3,
+        backoff_base_s=0.01,
+        backoff_max_s=0.02,
+    )
+    s = Session(tmp_path, c, {"read_query": ["hang", "ok"], "write_query": ["hang", "ok"]})
+
+    async def body(s: Session) -> None:
+        s.send(call(1, "read_query"))
+        s.send(call(2, "write_query"))
+        await s.wait_for(2)
+
+    await run_session(s, body)
+    r = s.replies()
+    assert "result" in r[1] and r[1]["result"].get("isError") is None
+    assert "outcome unknown" in text_of(r[2])
+    assert s.upstream_counts() == {"read_query": 2, "write_query": 1}
+
+
+@pytest.mark.anyio
+async def test_write_tool_validation_failure_counts_for_breaker(tmp_path: Path) -> None:
+    s = Session(
+        tmp_path,
+        cfg(retry=True, schema_validation=True, circuit_breaker=True, breaker_threshold=1),
+        {"write_query": ["drift", "ok"]},
+    )
+
+    async def body(s: Session) -> None:
+        s.send({"jsonrpc": "2.0", "id": "L", "method": "tools/list"})
+        await s.wait_for(1)
+        s.send(call(1, "write_query"))
+        await s.wait_for(2)
+        s.send(call(2, "write_query"))
+        await s.wait_for(3)
+
+    await run_session(s, body)
+    r = s.replies()
+    assert "outcome unknown" in text_of(r[1])
+    assert text_of(r[2]) == CIRCUIT_OPEN_TEXT
+    assert s.upstream_counts() == {"write_query": 1}
+
+
+@pytest.mark.anyio
+async def test_garbage_not_attributed_while_superseded_attempt_outstanding(
+    tmp_path: Path,
+) -> None:
+    # rows attempt 1 hangs past the deadline (superseded, its reply arrives late); the retry then
+    # sees garbage, which must NOT be attributed to the retry because attempt 1 is outstanding.
+    s = Session(
+        tmp_path,
+        cfg(retry=True, deadline_s=0.3, max_retries=1),
+        {"rows": ["late:0.6", "garbage"]},
+    )
+
+    async def body(s: Session) -> None:
+        s.send(call(1))
+        await s.wait_for(1)
+        await anyio.sleep(0.5)
+
+    await run_session(s, body)
+    assert "timed out" in text_of(s.replies()[1])  # garbage dropped; deadline decided
+    acts = s.actions()
+    assert "dropped_line" in acts
+    first_retry = next(e for e in s.events() if e["detail"]["guard_action"] == "retried")
+    assert first_retry["detail"]["kind"] == "deadline"
+
+
+@pytest.mark.anyio
+async def test_permanent_error_neither_success_nor_failure(tmp_path: Path) -> None:
+    s = Session(
+        tmp_path,
+        cfg(circuit_breaker=True, breaker_threshold=2, breaker_cooldown_s=30),
+        {"rows": ["error_fail_a", "denied", "denied", "denied"]},
+    )
+    # two failures would open the breaker (threshold 2); permanent errors in between must not
+    # reset the consecutive-failure count (no record_success) nor add to it.
+    s.behaviors = {"rows": ["garbage", "denied", "garbage", "ok"]}
+
+    async def body(s: Session) -> None:
+        for i in (1, 2, 3, 4):
+            s.send(call(i))
+            await s.wait_for(i)
+
+    await run_session(s, body)
+    r = s.replies()
+    assert r[2]["error"]["code"] == -32001
+    assert text_of(r[3]) != CIRCUIT_OPEN_TEXT and "unparseable" in text_of(r[3])
+    assert text_of(r[4]) == CIRCUIT_OPEN_TEXT  # 2 failures, permanent error did not reset them
 
 
 @pytest.mark.anyio

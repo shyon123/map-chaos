@@ -14,7 +14,7 @@ import mcp_types as types
 import pytest
 from mcp import Client, StdioServerParameters
 
-from mcp_chaos.harden.config import GuardConfig
+from mcp_chaos.harden.config import READ_ONLY_TOOLS, GuardConfig
 from mcp_chaos.proxy.faults import discover
 from mcp_chaos.proxy.faults.base import REGISTRY
 from mcp_chaos.schemas import FaultMode, FaultPlan, FaultSpec
@@ -47,6 +47,7 @@ def needs(mode: FaultMode) -> pytest.MarkDecorator:
 
 def guard_cfg(**kw: Any) -> GuardConfig:
     h = {k: kw.pop(k) for k in list(kw) if k in HardeningConfig.model_fields}
+    kw.setdefault("retry_tools", frozenset({"read_rows", "get_doc", "flaky"}) | READ_ONLY_TOOLS)
     return GuardConfig(hardening=HardeningConfig(**h), **kw)
 
 

@@ -87,6 +87,7 @@ class Comparison(_Frozen):
     a: str  # before / first framework
     b: str  # after / second framework
     n_pairs: int
+    n_pairs_dropped_harness_error: int = 0  # pairs lost because either side was excluded
     insufficient_n: bool
     only_a_success: int  # discordant: a succeeded, b failed
     only_b_success: int
@@ -104,6 +105,7 @@ class CleanOverhead(_Frozen):
     framework: str
     arm: str
     n_pairs: int
+    n_pairs_dropped_harness_error: int = 0
     insufficient_n: bool
     success_delta: float | None
     delta_lo: float | None
@@ -111,6 +113,13 @@ class CleanOverhead(_Frozen):
     mean_token_delta: float
     mean_cost_delta_usd: float
     mean_wall_delta_s: float
+
+
+class ExcludedGroup(_Frozen):
+    framework: str
+    arm: str
+    cell: str
+    n_excluded_harness_error: int
 
 
 class TaxonomyRow(_Frozen):
@@ -129,6 +138,7 @@ class Scorecard(_Frozen):
     synthetic: bool
     n_runs: int
     n_excluded_harness_error: int
+    excluded_by_group: list[ExcludedGroup] = []
     n_labeled: int
     n_unlabeled: int
     groups: list[GroupStats]
@@ -350,13 +360,14 @@ def _compare(
     a: str,
     b: str,
     pairs: list[tuple[bool, bool]],
+    dropped: int = 0,
 ) -> Comparison:
     n = len(pairs)
     only_a = sum(1 for x, y in pairs if x and not y)
     only_b = sum(1 for x, y in pairs if y and not x)
     xs = [int(x) for x, _ in pairs]
     ys = [int(y) for _, y in pairs]
-    lo, hi = paired_bootstrap_diff_ci(xs, ys)
+    lo, hi = paired_bootstrap_diff_ci(xs, ys) if n else (None, None)
     return Comparison(
         kind=kind,
         framework=framework,
@@ -365,15 +376,16 @@ def _compare(
         a=a,
         b=b,
         n_pairs=n,
+        n_pairs_dropped_harness_error=dropped,
         insufficient_n=n < MIN_N,
         only_a_success=only_a,
         only_b_success=only_b,
-        rate_a=sum(xs) / n,
-        rate_b=sum(ys) / n,
-        delta=(sum(ys) - sum(xs)) / n,
+        rate_a=sum(xs) / n if n else None,
+        rate_b=sum(ys) / n if n else None,
+        delta=(sum(ys) - sum(xs)) / n if n else None,
         delta_lo=lo,
         delta_hi=hi,
-        p_value=mcnemar_exact(only_a, only_b),
+        p_value=mcnemar_exact(only_a, only_b) if n else None,
         p_holm=None,
         significant=False,
     )
@@ -384,26 +396,40 @@ def _apply_holm(comps: list[Comparison], family: Callable[[Comparison], str]) ->
     for i, c in enumerate(comps):
         fams[family(c)].append(i)
     out = list(comps)
-    for idx in fams.values():
+    for fam_idx in fams.values():
+        idx = [i for i in fam_idx if comps[i].p_value is not None]
         adj = holm_adjust([cast("float", comps[i].p_value) for i in idx])
         for i, p in zip(idx, adj, strict=True):
-            out[i] = comps[i].model_copy(update={"p_holm": p, "significant": p < 0.05})
+            sig = p < 0.05 and not comps[i].insufficient_n
+            out[i] = comps[i].model_copy(update={"p_holm": p, "significant": sig})
     return out
 
 
+def _excluded(r: Row) -> bool:
+    return r.status == "harness_error"
+
+
 def _hardening_comparisons(rows: list[Row]) -> list[Comparison]:
+    """``rows`` includes harness_error rows: a pair with either side excluded is dropped."""
     base: dict[tuple[str, str, str, int], Row] = {
         (r.framework, r.task, r.cell, r.seed): r for r in rows if r.arm == BASELINE_ARM
     }
     groups: dict[tuple[str, str, str], list[tuple[bool, bool]]] = defaultdict(list)
+    dropped: dict[tuple[str, str, str], int] = defaultdict(int)
     for r in sorted(rows, key=lambda r: (r.framework, r.cell, r.arm, r.task, r.seed)):
         if r.arm == BASELINE_ARM:
             continue
         b = base.get((r.framework, r.task, r.cell, r.seed))
-        if b is not None:
-            groups[(r.framework, r.cell, r.arm)].append((b.success, r.success))
+        if b is None:
+            continue
+        gk = (r.framework, r.cell, r.arm)
+        if _excluded(b) or _excluded(r):
+            dropped[gk] += 1
+            groups.setdefault(gk, [])
+        else:
+            groups[gk].append((b.success, r.success))
     comps = [
-        _compare("hardening", fw, cell, arm, BASELINE_ARM, arm, p)
+        _compare("hardening", fw, cell, arm, BASELINE_ARM, arm, p, dropped[(fw, cell, arm)])
         for (fw, cell, arm), p in sorted(groups.items())
     ]
     return _apply_holm(comps, lambda c: f"{c.framework}|{c.arm}")
@@ -418,14 +444,21 @@ def _framework_comparisons(rows: list[Row]) -> list[Comparison]:
     for i, fa in enumerate(fws):
         for fb in fws[i + 1 :]:
             groups: dict[tuple[str, str], list[tuple[bool, bool]]] = defaultdict(list)
+            dropped: dict[tuple[str, str], int] = defaultdict(int)
             for r in sorted(rows, key=lambda r: (r.cell, r.arm, r.task, r.seed)):
                 if r.framework != fa:
                     continue
                 o = idx.get((r.task, r.cell, r.arm, r.seed, fb))
-                if o is not None:
-                    groups[(r.cell, r.arm)].append((r.success, o.success))
+                if o is None:
+                    continue
+                gk = (r.cell, r.arm)
+                if _excluded(r) or _excluded(o):
+                    dropped[gk] += 1
+                    groups.setdefault(gk, [])
+                else:
+                    groups[gk].append((r.success, o.success))
             comps += [
-                _compare("framework", f"{fa}_vs_{fb}", cell, arm, fa, fb, p)
+                _compare("framework", f"{fa}_vs_{fb}", cell, arm, fa, fb, p, dropped[(cell, arm)])
                 for (cell, arm), p in sorted(groups.items())
             ]
     return _apply_holm(comps, lambda c: f"{c.framework}|{c.arm}")
@@ -435,12 +468,36 @@ def _clean_overhead(rows: list[Row]) -> list[CleanOverhead]:
     clean = [r for r in rows if r.clean]
     base = {(r.framework, r.task, r.cell, r.seed): r for r in clean if r.arm == BASELINE_ARM}
     groups: dict[tuple[str, str], list[tuple[Row, Row]]] = defaultdict(list)
+    dropped: dict[tuple[str, str], int] = defaultdict(int)
     for r in sorted(clean, key=lambda r: (r.framework, r.arm, r.cell, r.task, r.seed)):
         b = base.get((r.framework, r.task, r.cell, r.seed))
-        if r.arm != BASELINE_ARM and b is not None:
-            groups[(r.framework, r.arm)].append((b, r))
+        if r.arm == BASELINE_ARM or b is None:
+            continue
+        gk = (r.framework, r.arm)
+        if _excluded(b) or _excluded(r):
+            dropped[gk] += 1
+            groups.setdefault(gk, [])
+        else:
+            groups[gk].append((b, r))
     out: list[CleanOverhead] = []
     for (fw, arm), ps in sorted(groups.items()):
+        if not ps:
+            out.append(
+                CleanOverhead(
+                    framework=fw,
+                    arm=arm,
+                    n_pairs=0,
+                    n_pairs_dropped_harness_error=dropped[(fw, arm)],
+                    insufficient_n=True,
+                    success_delta=None,
+                    delta_lo=None,
+                    delta_hi=None,
+                    mean_token_delta=0.0,
+                    mean_cost_delta_usd=0.0,
+                    mean_wall_delta_s=0.0,
+                )
+            )
+            continue
         xs = [int(b.success) for b, _ in ps]
         ys = [int(h.success) for _, h in ps]
         lo, hi = paired_bootstrap_diff_ci(xs, ys)
@@ -449,6 +506,7 @@ def _clean_overhead(rows: list[Row]) -> list[CleanOverhead]:
                 framework=fw,
                 arm=arm,
                 n_pairs=len(ps),
+                n_pairs_dropped_harness_error=dropped[(fw, arm)],
                 insufficient_n=len(ps) < MIN_N,
                 success_delta=(sum(ys) - sum(xs)) / len(ps),
                 delta_lo=lo,
@@ -486,6 +544,11 @@ def build_scorecard(bench_dir: Path) -> Scorecard:
     manifest = _read_manifest(bench_dir / "manifest.json")
     included = [runs[k] for k in sorted(runs) if runs[k].status != "harness_error"]
     rows = [build_row(r, labels.get(r.run_id)) for r in included]
+    all_rows = [build_row(runs[k], labels.get(k)) for k in sorted(runs)]
+    excl_counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    for r in all_rows:
+        if _excluded(r):
+            excl_counts[(r.framework, r.arm, r.cell)] += 1
     by_group: dict[tuple[str, str, str], list[Row]] = defaultdict(list)
     tax: dict[tuple[str, str, str], int] = defaultdict(int)
     for r in rows:
@@ -505,9 +568,13 @@ def build_scorecard(bench_dir: Path) -> Scorecard:
         n_labeled=sum(r.labeled for r in rows),
         n_unlabeled=sum(not r.labeled for r in rows),
         groups=[_group(*k, v) for k, v in sorted(by_group.items())],
-        before_after=_hardening_comparisons(rows),
-        framework_comparisons=_framework_comparisons(rows),
-        clean_overhead=_clean_overhead(rows),
+        excluded_by_group=[
+            ExcludedGroup(framework=fw, arm=arm, cell=cell, n_excluded_harness_error=n)
+            for (fw, arm, cell), n in sorted(excl_counts.items())
+        ],
+        before_after=_hardening_comparisons(all_rows),
+        framework_comparisons=_framework_comparisons(all_rows),
+        clean_overhead=_clean_overhead(all_rows),
         taxonomy=[
             TaxonomyRow(framework=fw, cell=c, category=cat, count=n)
             for (fw, c, cat), n in sorted(tax.items())
@@ -547,7 +614,13 @@ def _comp_table(comps: list[Comparison]) -> list[str]:
             c.cell,
             c.arm,
             f"{c.a} -> {c.b}",
-            str(c.n_pairs) + (" (insufficient n)" if c.insufficient_n else ""),
+            str(c.n_pairs)
+            + (" (insufficient n)" if c.insufficient_n else "")
+            + (
+                f" ({c.n_pairs_dropped_harness_error} dropped)"
+                if c.n_pairs_dropped_harness_error
+                else ""
+            ),
             _pct(c.rate_a),
             _pct(c.rate_b),
             f"{_f(c.delta)} [{_f(c.delta_lo)}, {_f(c.delta_hi)}]",
@@ -577,7 +650,17 @@ def render_markdown(sc: Scorecard) -> str:
         f"- git sha: `{sc.git_sha}`",
         f"- models: {', '.join(sc.models) or '-'}",
         f"- runs included: {sc.n_runs} (labeled {sc.n_labeled}, unlabeled {sc.n_unlabeled})",
-        f"- excluded (harness_error): {sc.n_excluded_harness_error}",
+        f"- excluded (harness_error): {sc.n_excluded_harness_error}"
+        + (
+            " ("
+            + "; ".join(
+                f"{e.framework}/{e.arm}/{e.cell}: {e.n_excluded_harness_error}"
+                for e in sc.excluded_by_group
+            )
+            + "); pairs with an excluded side are dropped"
+            if sc.excluded_by_group
+            else ""
+        ),
         f"- cells with n < {MIN_N} are marked 'insufficient n'. Runs without judge labels fall "
         "back to the deterministic checker for task_success; other rates exclude unlabeled "
         "runs (denominators shown).",
@@ -633,7 +716,13 @@ def render_markdown(sc: Scorecard) -> str:
                 [
                     o.framework,
                     o.arm,
-                    str(o.n_pairs) + (" (insufficient n)" if o.insufficient_n else ""),
+                    str(o.n_pairs)
+                    + (" (insufficient n)" if o.insufficient_n else "")
+                    + (
+                        f" ({o.n_pairs_dropped_harness_error} dropped)"
+                        if o.n_pairs_dropped_harness_error
+                        else ""
+                    ),
                     f"{_f(o.success_delta)} [{_f(o.delta_lo)}, {_f(o.delta_hi)}]",
                     f"{o.mean_token_delta:+.0f}",
                     f"{o.mean_cost_delta_usd:+.4f}",

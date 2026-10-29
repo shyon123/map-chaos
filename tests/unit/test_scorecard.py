@@ -337,3 +337,45 @@ def test_empty_runs_file(tmp_path: Path) -> None:
     assert sc.n_runs == 0 and sc.groups == []
     md = (tmp_path / "b1" / "scorecard.md").read_text()
     assert "No paired data" in md and "No paired clean runs" in md
+
+
+def test_harness_error_exclusions_reported_and_pairs_dropped(tmp_path: Path) -> None:
+    runs = [
+        r
+        for r in synthetic_runs()
+        if not (r.config.framework == "langgraph" and r.config.seed == 3)
+    ]
+    for arm, seed, status in (("baseline", 3, "harness_error"), ("guard", 4, "completed")):
+        runs.append(make_run("langgraph", "F01", arm, seed, True, status=status))
+    # seed 3: only the baseline side exists and is excluded; seed 4 guard side excluded below
+    runs = [r for r in runs if not (r.config.framework == "langgraph" and r.config.seed == 4)]
+    runs.append(make_run("langgraph", "F01", "baseline", 4, True))
+    runs.append(make_run("langgraph", "F01", "guard", 4, True, status="harness_error"))
+    runs.append(make_run("langgraph", "F01", "guard", 3, True))
+    sc = build_scorecard(write_dir(tmp_path, runs))
+    assert sc.n_excluded_harness_error == 2
+    ex = {(e.framework, e.arm, e.cell): e.n_excluded_harness_error for e in sc.excluded_by_group}
+    assert ex == {("langgraph", "baseline", "F01"): 1, ("langgraph", "guard", "F01"): 1}
+    ba = {(c.framework, c.cell, c.arm): c for c in sc.before_after}
+    f01 = ba[("langgraph", "F01", "guard")]
+    assert f01.n_pairs == 10 and f01.n_pairs_dropped_harness_error == 2
+    fw = {(c.framework, c.cell, c.arm): c for c in sc.framework_comparisons}
+    assert fw[("agentsdk_vs_langgraph", "F01", "guard")].n_pairs_dropped_harness_error == 1
+    assert fw[("agentsdk_vs_langgraph", "F01", "baseline")].n_pairs_dropped_harness_error == 1
+    assert ba[("langgraph", "F08", "guard")].n_pairs_dropped_harness_error == 0
+
+
+def test_never_significant_when_insufficient_n() -> None:
+    from mcp_chaos.bench.scorecard import MIN_N, _apply_holm, _compare
+
+    k = max(MIN_N - 1, 6)
+    c = _compare("hardening", "fw", "F01", "guard", "baseline", "guard", [(False, True)] * k)
+    assert c.insufficient_n or k >= MIN_N
+    (out,) = _apply_holm([c], lambda _c: "x")
+    assert out.p_holm is not None
+    assert out.significant == (out.p_holm < 0.05 and not out.insufficient_n)
+    if out.insufficient_n:
+        assert not out.significant
+    empty = _compare("hardening", "fw", "F01", "guard", "baseline", "guard", [], 3)
+    assert empty.n_pairs == 0 and empty.p_value is None and not empty.significant
+    assert _apply_holm([empty], lambda _c: "x")[0].p_holm is None

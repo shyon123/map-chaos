@@ -32,6 +32,7 @@ code, and log lines, because tool output legitimately contains all of those.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, cast
@@ -171,10 +172,29 @@ def _quarantine_json(node: Any, findings: list[Finding]) -> Any:
     return node
 
 
+def _mirrors(text: str, sc: Any) -> bool:
+    try:
+        return bool(json.loads(text) == sc)
+    except (ValueError, RecursionError):
+        return False
+
+
 def filter_result(result: dict[str, Any]) -> tuple[dict[str, Any], list[Finding]]:
-    """Quarantine + spotlight every text block; quarantine strings in ``structuredContent``."""
+    """Quarantine + spotlight every text block; quarantine string leaves of ``structuredContent``.
+
+    Spotlighting is text-only: ``structuredContent`` is never wrapped in markers, because that
+    would break client-side ``outputSchema`` validation. Its string leaves (deterministic DFS in
+    dict insertion order) are quarantined in place, keeping keys, nesting and types intact. A text
+    block that is a JSON mirror of the original ``structuredContent`` is regenerated from the
+    quarantined copy (then spotlighted) so the two views stay consistent.
+    """
     out = copy.deepcopy(result)
     findings: list[Finding] = []
+    orig_sc: Any = result.get("structuredContent")
+    new_sc: Any = None
+    if "structuredContent" in out:
+        new_sc = _quarantine_json(out["structuredContent"], findings)
+        out["structuredContent"] = new_sc
     content: Any = out.get("content")
     if isinstance(content, list):
         for b in cast("list[Any]", content):
@@ -183,9 +203,10 @@ def filter_result(result: dict[str, Any]) -> tuple[dict[str, Any], list[Finding]
             blk = cast("dict[str, Any]", b)
             text: Any = blk.get("text")
             if blk.get("type") == "text" and isinstance(text, str):
-                clean, f = quarantine(text)
-                findings.extend(f)
+                if isinstance(orig_sc, dict) and _mirrors(text, orig_sc):
+                    clean = json.dumps(new_sc, separators=(",", ":"), ensure_ascii=False)
+                else:
+                    clean, f = quarantine(text)
+                    findings.extend(f)
                 blk["text"] = spotlight(clean)
-    if "structuredContent" in out:
-        out["structuredContent"] = _quarantine_json(out["structuredContent"], findings)
     return out, findings

@@ -8,9 +8,13 @@ fault proxy), and hardens ``tools/call`` responses with the components enabled i
   client's id is restored on the reply, so retries and stale replies cannot confuse the agent;
 - deadline / JSON-RPC error / unparseable line / validation failure -> bounded retry with
   seeded jittered backoff (``retry``), per-tool circuit breaker (``circuit_breaker``);
+- only tools in ``GuardConfig.retry_tools`` (read-only by default) are ever re-issued: a
+  timeout or malformed reply happens after the upstream may have executed, so a write is
+  reported as "outcome unknown" instead of being repeated;
 - a line from upstream that is not valid JSON-RPC and has no matching id is attributed to the
-  attempt when exactly one call is in flight (so it is retried immediately instead of waiting
-  for the deadline); otherwise it is dropped and counted;
+  attempt when exactly one call is in flight and no earlier (superseded) attempt is still
+  outstanding (so it is retried immediately instead of waiting for the deadline); otherwise it
+  is dropped and counted; late replies from superseded attempts are dropped and counted;
 - successful results go through size cap, then injection filter.
 
 Components are independent: with ``retry`` off there is no deadline either (a hang stays a
@@ -46,6 +50,9 @@ log = get_logger(__name__)
 
 UID_PREFIX = "mcpchaos-guard-"
 CIRCUIT_OPEN_TEXT = "tool temporarily unavailable (circuit open)"
+UNKNOWN_OUTCOME_TEXT = (
+    "tool call outcome unknown: it may have executed; verify state before retrying"
+)
 _GRACE_S = 5.0
 _CHUNK = 65536
 
@@ -130,6 +137,7 @@ class Guard:
         self._rng = self._policy.rng()
         self._breakers = BreakerBank(cfg.breaker_threshold, cfg.breaker_cooldown_s)
         self._routes: dict[str, MemoryObjectSendStream[bytes]] = {}  # attempt uid -> reply stream
+        self._superseded: set[str] = set()  # attempts abandoned at the deadline, reply may come
         self._inflight: dict[tuple[str, int | str], _Inflight] = {}
         self._list_pending: set[tuple[str, int | str]] = set()
         self._schemas: dict[str, dict[str, Any]] = {}
@@ -206,6 +214,7 @@ class Guard:
                     route.send_nowait(line)
                 else:
                     self.stale += 1
+                    self._superseded.discard(raw_id)
                     log.info("guard_stale_reply", uid=raw_id)
                 return
             key = _id_key(raw_id)
@@ -216,7 +225,7 @@ class Guard:
                 await self._send_down(line)
                 return
         # garbage, a non-object, or a reply without a usable id
-        if len(self._routes) == 1:
+        if len(self._routes) == 1 and not self._superseded:
             next(iter(self._routes.values())).send_nowait(line)
             return
         self.dropped += 1
@@ -298,6 +307,8 @@ class Guard:
                 self._routes.pop(uid, None)
                 send.close()
                 recv.close()
+            if line is None:
+                self._superseded.add(uid)
             kind, obj, problems = self._classify(line, tool)
             if kind is None:
                 return await self._succeed(_need(obj), tool, orig_id, breaker, t_start)
@@ -309,7 +320,7 @@ class Guard:
                     {"guard_action": "validated_fail", "problems": cast("JsonValue", problems)},
                     is_error=True,
                 )
-            if self._h.retry and self._policy.may_retry(retries):
+            if self._h.retry and tool in self.cfg.retry_tools and self._policy.may_retry(retries):
                 delay = self._policy.backoff_s(retries, self._rng)
                 retries += 1
                 await self._emit(
@@ -340,7 +351,10 @@ class Guard:
         t_start: float,
     ) -> dict[str, Any]:
         if self._h.circuit_breaker:
-            breaker.record_success()
+            if "error" in obj:  # permanent JSON-RPC error: neither a success nor a failure
+                breaker.release_probe()
+            else:
+                breaker.record_success()
         notes: list[Detail] = []
         if "result" in obj:
             obj, notes = transform_response(self._h, obj)
@@ -360,6 +374,8 @@ class Guard:
         n = f"{attempts} attempt{'s' if attempts != 1 else ''}"
         if kind == "rpc_error" and obj is not None:
             return {"jsonrpc": "2.0", **obj, "id": orig_id}
+        if tool not in self.cfg.retry_tools:
+            return tool_error(orig_id, self._unknown_outcome(kind, tool, problems))
         if kind == "deadline":
             text = (
                 f"tool '{tool}' timed out after {self.cfg.deadline_s:g}s ({n}); "
@@ -377,6 +393,15 @@ class Guard:
             )
             text = f"tool '{tool}' returned a malformed result ({n}): {body}"
         return tool_error(orig_id, text)
+
+    def _unknown_outcome(self, kind: FailureKind, tool: str, problems: list[str]) -> str:
+        why = {
+            "deadline": f"timed out after {self.cfg.deadline_s:g}s",
+            "unparseable": "returned an unparseable response",
+            "validation": "returned a malformed result: " + "; ".join(problems[:3]),
+            "rpc_error": "returned an error",
+        }[kind]
+        return f"{UNKNOWN_OUTCOME_TEXT} (tool '{tool}' {why}; not retried: not read-only)."
 
 
 # ------------------------------------------------------------------ process shell

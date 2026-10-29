@@ -73,6 +73,10 @@ class CircuitBreaker:
         self._opened_at = None
         self._probing = False
 
+    def release_probe(self) -> None:
+        """A half-open probe ended neither as success nor failure: allow the next probe."""
+        self._probing = False
+
     def record_failure(self, now: float) -> None:
         if self._probing:
             self._probing = False
