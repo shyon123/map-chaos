@@ -65,6 +65,7 @@ class RunResult(_Frozen):
     final_answer: str | None = None
     side_effects: SideEffects = Field(default_factory=SideEffects)
     faults_fired: list[FaultApplied] = Field(default_factory=list[FaultApplied])
+    canary_hits: dict[str, list[str]] = Field(default_factory=dict[str, list[str]])
     check: CheckSummary | None = None
     labels: Labels | None = None
     usage: Usage = Field(default_factory=Usage)

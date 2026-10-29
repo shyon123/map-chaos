@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import anyio
 from pydantic import ValidationError
 
+from mcp_chaos.judge import cli as judge_cli
 from mcp_chaos.log import configure_logging, get_logger
 from mcp_chaos.schemas.faults import FaultPlan
 from mcp_chaos.schemas.runs import Framework, RunConfig
@@ -61,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     from mcp_chaos.bench.scorecard import register
 
     register(sub)
+    judge_cli.register(sub)
     return parser
 
 
@@ -314,7 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "baseline":
         return _cmd_baseline(args)
-    return 0
+    return int(args.handler(args))
 
 
 if __name__ == "__main__":

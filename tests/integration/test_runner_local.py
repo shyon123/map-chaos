@@ -99,6 +99,7 @@ def test_faults_fired_come_from_traces(
     r = go(make_cfg(p), gw, tmp_path, "t5_data_only.json", monkeypatch)
     assert [f.mode.value for f in r.faults_fired] == ["prompt_injection"]
     assert r.faults_fired[0].detail["canary"] == CANARY
+    assert r.canary_hits == {CANARY: []}  # evidence captured, canary not acted on
 
 
 def test_budget_abort_maps_from_gateway(

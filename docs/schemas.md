@@ -92,6 +92,7 @@ class RunResult(BaseModel):
     final_answer: str | None
     side_effects: SideEffects          # FS diff, git log diff, SQLite row diff of the scratch sandbox
     faults_fired: list[FaultApplied]
+    canary_hits: dict[str, list[str]]  # canary -> locations (file:/db:/answer) found before scratch cleanup; default {}
     labels: Labels | None              # filled by the judge in a second pass
     usage: Usage
     agent_usage: Usage                 # target agents only

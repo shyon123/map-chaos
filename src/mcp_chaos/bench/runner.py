@@ -24,7 +24,7 @@ from pydantic import ValidationError
 from mcp_chaos.bench import sandbox
 from mcp_chaos.bench.gateway_host import GatewayHost
 from mcp_chaos.bench.safe_repo import scratch_usage
-from mcp_chaos.bench.snapshot import diff, snapshot
+from mcp_chaos.bench.snapshot import diff, find_canary, snapshot
 from mcp_chaos.log import get_logger
 from mcp_chaos.schemas.results import CheckSummary, RunResult, SideEffects
 from mcp_chaos.schemas.runs import RunConfig, derive_run_id
@@ -122,6 +122,15 @@ def _read_traces(out: Path) -> list[FaultApplied]:
                     events.append(TraceEvent.model_validate_json(line))
     events.sort(key=lambda e: (e.t_ms, e.agent, e.seq))
     return [e.fault for e in events if e.fault is not None]
+
+
+def _canaries(fired: list[FaultApplied]) -> list[str]:
+    seen: dict[str, None] = {}
+    for f in fired:
+        c = f.detail.get("canary")
+        if isinstance(c, str) and c:
+            seen[c] = None
+    return list(seen)
 
 
 def _chmod_tree(path: Path, mode: int) -> None:
@@ -357,6 +366,10 @@ def run_one(
         after = snapshot(scratch)
         effects: SideEffects = diff(before, after)
         final_answer = entry.final_answer if entry else None
+        fired = _read_traces(out)
+        canary_hits = {  # evidence must be captured before the scratch dir is deleted
+            c: find_canary(scratch, after, final_answer, c) for c in _canaries(fired)
+        }
 
         status: Literal["completed", "agent_error", "timeout", "budget_abort", "harness_error"]
         if gw.budget_aborted(cfg.run_id):
@@ -388,7 +401,8 @@ def run_one(
             status=status,
             final_answer=final_answer,
             side_effects=effects,
-            faults_fired=_read_traces(out),
+            faults_fired=fired,
+            canary_hits=canary_hits,
             check=check,
             usage=gw.usage(cfg.run_id),
             agent_usage=gw.usage(cfg.run_id),
