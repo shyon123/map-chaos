@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from contextlib import AsyncExitStack
-from pathlib import Path
 from typing import Any, Literal, cast
 
 import anyio
@@ -19,13 +18,12 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, ConfigDict
 
 from mcp_chaos.log import get_logger
-from mcp_chaos.schemas.runs import RunConfig
+from mcp_chaos.schemas.runs import HardeningConfig, RunConfig
 from mcp_chaos.targets.langgraph_target.mcp_tools import worker_tools
-from mcp_chaos.targets.workers import WORKERS, WorkerName
+from mcp_chaos.targets.workers import WORKERS, WorkerName, system_prompt
 
 log = get_logger(__name__)
 
-PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 ModelFactory = Callable[[str], BaseChatModel]
 
 
@@ -48,8 +46,8 @@ class _TurnCounter(BaseCallbackHandler):
         self.turns += 1
 
 
-def _load_prompt(role: str, scratch: str) -> SystemMessage:
-    text = (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8").replace("{scratch}", scratch)
+def _load_prompt(role: str, scratch: str, hardening: HardeningConfig | None) -> SystemMessage:
+    text = system_prompt(role, hardening, scratch=scratch)
     return SystemMessage(
         content=[{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
     )
@@ -129,7 +127,10 @@ async def _run(
                 continue
             tools = await stack.enter_async_context(worker_tools(spec, cmds[name]))
             agent: Any = create_agent(  # pyright: ignore[reportUnknownVariableType]
-                factory(name), tools, system_prompt=_load_prompt(name, scratch), name=name
+                factory(name),
+                tools,
+                system_prompt=_load_prompt(name, scratch, cfg.hardening),
+                name=name,
             )
             delegates.append(
                 _delegate_tool(name, agent, limit, f"Delegate an instruction to the {name} worker.")
@@ -137,7 +138,7 @@ async def _run(
         supervisor: Any = create_agent(  # pyright: ignore[reportUnknownVariableType]
             factory("supervisor"),
             delegates,
-            system_prompt=_load_prompt("supervisor", scratch),
+            system_prompt=_load_prompt("supervisor", scratch, cfg.hardening),
             name="supervisor",
         )
         result = await supervisor.ainvoke(

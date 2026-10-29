@@ -1,0 +1,48 @@
+# Hardening ablation (ADR 0007): which guard component matters for which fault?
+# 2 frameworks x 6 tasks x 4 cells x 7 arms x 3 seeds = 1008 runs.
+# Cells: F01 (hang -> retry/deadline), F04 (malformed JSON -> validation/retry),
+# F05-content (schema drift -> validation), F08-echo_in_answer (injection -> filter/prompt).
+# Arms isolate one component each; guard_full = all components + prompt addendum;
+# prompt_only = the system-prompt addendum with no guard in the chain.
+bench_id: ablation
+cells_file: cells.yaml
+cells:
+  - F01-timeout
+  - F04-malformed_json
+  - F05-content
+  - F08-echo_in_answer
+frameworks: [langgraph, agentsdk]
+tasks: all
+arms:
+  - name: baseline
+    hardening: null
+  - name: guard_full
+    hardening:
+      schema_validation: true
+      retry: true
+      circuit_breaker: true
+      injection_filter: true
+      size_cap: true
+      prompt_addendum: true
+  - name: guard_retry
+    hardening:
+      retry: true
+      circuit_breaker: true
+  - name: guard_validate
+    hardening:
+      schema_validation: true
+  - name: guard_filter
+    hardening:
+      injection_filter: true
+  - name: guard_sizecap
+    hardening:
+      size_cap: true
+  - name: prompt_only
+    hardening:
+      prompt_addendum: true
+seeds: [0, 1, 2]
+agent_model: claude-haiku-5-5
+max_turns: 25
+timeout_s: 300
+per_run_budget_usd: 0.5
+concurrency: 4

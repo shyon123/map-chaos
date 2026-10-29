@@ -29,10 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("proxy", help="fault-injecting stdio proxy (append: -- <upstream cmd...>)")
     p.add_argument("--agent", required=True)
     p.add_argument("--server", required=True)
-    p.add_argument("--plan", required=True, type=Path)
+    p.add_argument("--plan", type=Path, default=None, help="fault plan (fault mode)")
     p.add_argument("--run-id", required=True)
     p.add_argument("--mode", choices=["fault", "guard"], default="fault")
     p.add_argument("--allow", default=None, help="comma-separated tool allowlist")
+    p.add_argument(
+        "--guard-config", default=None, help="guard mode: GuardConfig JSON, inline or a file path"
+    )
     p.add_argument("--trace-out", required=True, type=Path)
 
     def common(sp: argparse.ArgumentParser) -> None:
@@ -71,11 +74,13 @@ def _run_proxy(args: argparse.Namespace, upstream: list[str]) -> int:
     from mcp_chaos.proxy.engine import FaultEngine, UnsupportedFaultError
     from mcp_chaos.proxy.relay import SystemClock, run_relay
 
-    if args.mode == "guard":
-        sys.stderr.write("mcp-chaos: --mode guard is not implemented yet\n")
-        return 2
     if not upstream:
         sys.stderr.write("mcp-chaos: missing upstream command after --\n")
+        return 2
+    if args.mode == "guard":
+        return _run_guard(args, upstream)
+    if args.plan is None:
+        sys.stderr.write("mcp-chaos: --plan is required in fault mode\n")
         return 2
     configure_logging()
     log = get_logger(__name__)
@@ -98,6 +103,33 @@ def _run_proxy(args: argparse.Namespace, upstream: list[str]) -> int:
     )
     log.info("proxy_start", server=args.server, plan_id=plan.plan_id, run_id=args.run_id)
     return anyio.run(run_relay, core, upstream, Path(args.trace_out), args.server)
+
+
+def _run_guard(args: argparse.Namespace, upstream: list[str]) -> int:
+    from mcp_chaos.harden.config import GuardConfig
+    from mcp_chaos.proxy.guard import run_guard
+
+    raw = args.guard_config
+    if raw is None:
+        sys.stderr.write("mcp-chaos: --guard-config is required in guard mode\n")
+        return 2
+    try:
+        text = str(raw) if str(raw).lstrip().startswith("{") else Path(raw).read_text("utf-8")
+        cfg = GuardConfig.model_validate_json(text)
+    except (OSError, ValidationError) as e:
+        sys.stderr.write(f"mcp-chaos: bad guard config: {e}\n")
+        return 2
+    configure_logging()
+    return anyio.run(
+        lambda: run_guard(
+            cfg,
+            upstream,
+            Path(args.trace_out),
+            run_id=args.run_id,
+            agent=args.agent,
+            server=args.server,
+        )
+    )
 
 
 def _load_env_file(path: Path) -> None:

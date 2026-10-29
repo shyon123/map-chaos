@@ -28,7 +28,7 @@ arms:
       circuit_breaker: true
       injection_filter: true
       size_cap: true
-      prompt_addendum: false
+      prompt_addendum: true
 seeds: [0, 1, 2]
 agent_model: claude-haiku-5-5
 max_turns: 25

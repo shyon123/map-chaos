@@ -18,10 +18,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from mcp_chaos.harden.config import GuardConfig
+from mcp_chaos.schemas.runs import HardeningConfig
+
 FS_SERVER_VERSION = "2.0.1"
 VCS_SERVER_VERSION = "2026.10.19"
 
 WorkerName = Literal["files", "data", "vcs"]
+
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+ADDENDUM_FILE = "hardening_addendum.md"
 
 
 class WorkerSpec(BaseModel):
@@ -104,6 +110,27 @@ def upstream_cmd(
     return ["uvx", f"mcp-server-git=={VCS_SERVER_VERSION}", "--repository", s]
 
 
+def system_prompt(
+    role: str, hardening: HardeningConfig | None = None, *, scratch: str = "/scratch"
+) -> str:
+    """System prompt for ``role`` (supervisor or a worker); framework-neutral.
+
+    ``{scratch}`` is substituted; the hardening addendum is appended when
+    ``hardening.prompt_addendum`` is set.
+    """
+    text = (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8").replace("{scratch}", scratch)
+    if hardening is not None and hardening.prompt_addendum:
+        text = text.rstrip("\n") + "\n\n" + (PROMPTS_DIR / ADDENDUM_FILE).read_text("utf-8")
+    return text
+
+
+def needs_guard(h: HardeningConfig | None) -> bool:
+    """True when any guard-proxy component (not just the prompt addendum) is enabled."""
+    return h is not None and (
+        h.schema_validation or h.retry or h.circuit_breaker or h.injection_filter or h.size_cap
+    )
+
+
 def proxy_cmd(
     worker: WorkerSpec,
     *,
@@ -111,9 +138,11 @@ def proxy_cmd(
     plan_path: Path,
     trace_dir: Path,
     upstream: list[str],
+    hardening: HardeningConfig | None = None,
+    seed: int = 0,
 ) -> list[str]:
-    """Fault-proxy command wrapping ``upstream`` for this worker."""
-    return [
+    """Fault-proxy command wrapping ``upstream``; wrapped in a guard when hardening is on."""
+    fault = [
         sys.executable,
         "-m",
         "mcp_chaos.bench.cli",
@@ -132,4 +161,27 @@ def proxy_cmd(
         str(trace_dir / f"{worker.name}-{worker.server_id}.jsonl"),
         "--",
         *upstream,
+    ]
+    if hardening is None or not needs_guard(hardening):
+        return fault
+    guard_cfg = GuardConfig(hardening=hardening, seed=seed)
+    return [
+        sys.executable,
+        "-m",
+        "mcp_chaos.bench.cli",
+        "proxy",
+        "--mode",
+        "guard",
+        "--agent",
+        worker.name,
+        "--server",
+        worker.server_id,
+        "--run-id",
+        run_id,
+        "--guard-config",
+        guard_cfg.model_dump_json(),
+        "--trace-out",
+        str(trace_dir / f"{worker.name}-{worker.server_id}.guard.jsonl"),
+        "--",
+        *fault,
     ]

@@ -131,7 +131,13 @@ def build_cmds(
         spec = WORKERS[name]
         up = upstream_cmd(spec, env=_upstream_env(), scratch=scratch)
         cmds[name] = proxy_cmd(
-            spec, run_id=cfg.run_id, plan_path=plan_path, trace_dir=out / "traces", upstream=up
+            spec,
+            run_id=cfg.run_id,
+            plan_path=plan_path,
+            trace_dir=out / "traces",
+            upstream=up,
+            hardening=cfg.hardening,
+            seed=cfg.seed,
         )
     return cmds
 
