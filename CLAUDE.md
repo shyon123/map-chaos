@@ -6,18 +6,24 @@ Chaos-testing harness for MCP-based multi-agent systems. Full design: `SPEC.md`.
 ```
 src/mcp_chaos/
   schemas/      pydantic v2 models: faults.py, runs.py, results.py, trace.py  (single source of truth)
-  proxy/        raw JSON-RPC stdio relay (ADR 0002): relay.py, framing.py, engine.py (seeded), faults/<mode>.py, canaries.py
+  proxy/        raw JSON-RPC stdio relay (ADR 0002): relay.py, core.py, framing.py, engine.py (seeded),
+                faults/<mode>.py (F01-F11, discover.py registry), canaries.py, guard.py (hardening proxy, ADR 0007)
+  harden/       guard components: config.py, pipeline.py, validate.py, retry.py (retry + breaker),
+                inject_filter.py, size_cap.py
   servers/      fake_server.py (deterministic, tests only), sqlite_server.py (ADR 0004)
-  targets/      tasks.py, prompts/*.md, fixtures/<task_id>/, langgraph_target/, agentsdk_target/
-  llm/          gateway.py (ADR 0003), cache.py (key=(model,normalized body,seed)), cassette.py, budget.py, prices.py, client.py
-  judge/        deterministic.py, llm_judge.py, labels.py
-  redteam/      agent.py (reads traces, proposes next FaultPlan)
-  harden/       middleware: validate.py, retry.py (retry+circuit breaker), inject_filter.py
-  bench/        runner.py, scorecard.py, cli.py (`mcp-chaos` entrypoint)
+  targets/      tasks.py, fixtures.py, workers.py, entry.py (in-sandbox entrypoint, scripted fake models),
+                prompts/*.md, langgraph_target/, agentsdk_target/
+  llm/          gateway.py (ADR 0003), cache.py, cassette.py, budget.py, prices.py, normalize.py,
+                fake_anthropic.py (scripted fake Anthropic API for tests)
+  judge/        deterministic.py, llm_judge.py, labels.py, kappa.py, cli.py
+  redteam/      agent.py, loop.py (adaptive vs random search), space.py, sanitize.py, models.py, cli.py
+  bench/        cli.py (`mcp-chaos` entrypoint), matrix.py, runner.py, sandbox.py, gateway_host.py,
+                safe_repo.py, snapshot.py, stats.py, scorecard.py
   log.py        structlog config + secret redaction
-tests/unit  tests/property  tests/integration  tests/live (@live, opt-in)
-cassettes/   recorded LLM traffic (committed)      results/  JSONL run outputs (committed)
-configs/     bench/run YAML        docker/      sandbox image for target agents        docs/     adr/, diagrams, taxonomy, schemas
+tests/unit  tests/property  tests/integration  tests/fixtures (fake_models/, fake_scripts/)  tests/live (@live, opt-in)
+configs/     bench.yaml, cells.yaml, ablation.yaml, smoke.yaml, selftest.yaml, selftest_cells.yaml
+results/     committed run outputs; results/selftest-synthetic/ is the SYNTHETIC $0 demo (make selftest)
+cassettes/   recorded LLM traffic (none yet)      docker/   sandbox image      docs/   adr/, architecture, taxonomy, schemas, limitations
 ```
 
 ## Commands
@@ -29,6 +35,7 @@ uv run pytest -q                         # unit+property+integration, replays ca
 uv run pytest -q -m live                 # opt-in live LLM tests (needs ANTHROPIC_API_KEY)
 uv run pytest --cov=mcp_chaos --cov-fail-under=85
 make check                               # all of the above except live
+make selftest                            # $0 end-to-end demo with scripted fake models (SYNTHETIC)
 uv run mcp-chaos run --config configs/<x>.yaml --budget-usd 2
 ```
 

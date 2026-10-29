@@ -180,7 +180,12 @@ def load_labels(path: Path) -> dict[str, LabelRec]:
             continue
         d = cast("dict[str, Any]", obj)
         rid, labels = d.get("run_id"), d.get("labels")
-        if not isinstance(rid, str) or not isinstance(labels, dict):
+        if not isinstance(rid, str):
+            continue
+        if not isinstance(labels, dict):
+            # offline judge (no LLM): only the deterministic part exists
+            labels = d.get("deterministic") if d.get("status") == "offline" else None
+        if not isinstance(labels, dict):
             continue
         ld = cast("dict[str, Any]", labels)
         blast: BlastRadius | None = None
@@ -538,8 +543,11 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     return cast("dict[str, Any]", obj) if isinstance(obj, dict) else {}
 
 
-def build_scorecard(bench_dir: Path) -> Scorecard:
+def build_scorecard(bench_dir: Path, *, deterministic: bool = False) -> Scorecard:
+    """``deterministic`` zeroes wall-clock times and redacts the git sha (byte-stable reruns)."""
     runs = load_runs(bench_dir / "runs.jsonl")
+    if deterministic:
+        runs = {k: r.model_copy(update={"wall_s": 0.0}) for k, r in runs.items()}
     labels = load_labels(bench_dir / "labels.jsonl")
     manifest = _read_manifest(bench_dir / "manifest.json")
     included = [runs[k] for k in sorted(runs) if runs[k].status != "harness_error"]
@@ -555,7 +563,9 @@ def build_scorecard(bench_dir: Path) -> Scorecard:
         by_group[(r.framework, r.cell, r.arm)].append(r)
         tax[(r.framework, r.cell, r.category)] += 1
     git_sha = str(manifest.get("git_sha") or "")
-    if not git_sha:
+    if deterministic:
+        git_sha = "redacted"
+    elif not git_sha:
         git_sha = next((r.versions["git_sha"] for r in included if "git_sha" in r.versions), "")
     return Scorecard(
         bench_id=str(manifest.get("bench_id") or bench_dir.name),
@@ -842,8 +852,8 @@ def render_plots(sc: Scorecard, out_dir: Path) -> list[Path]:
 # ----------------------------------------------------------------------------- CLI
 
 
-def write_outputs(bench_dir: Path) -> Scorecard:
-    sc = build_scorecard(bench_dir)
+def write_outputs(bench_dir: Path, *, deterministic: bool = False) -> Scorecard:
+    sc = build_scorecard(bench_dir, deterministic=deterministic)
     (bench_dir / "scorecard.json").write_text(sc.model_dump_json(indent=2) + "\n", encoding="utf-8")
     (bench_dir / "scorecard.md").write_text(render_markdown(sc), encoding="utf-8")
     render_plots(sc, bench_dir / "plots")
@@ -855,7 +865,7 @@ def _cmd(args: argparse.Namespace) -> int:
     if not (bench_dir / "runs.jsonl").is_file():
         sys.stderr.write(f"mcp-chaos: no runs.jsonl in {bench_dir}\n")
         return 2
-    sc = write_outputs(bench_dir)
+    sc = write_outputs(bench_dir, deterministic=bool(args.deterministic))
     log.info("scorecard_written", bench_id=sc.bench_id, n_runs=sc.n_runs)
     print(f"scorecard: {sc.n_runs} runs -> {bench_dir / 'scorecard.md'}")
     return 0
@@ -865,4 +875,9 @@ def register(subparsers: Any) -> None:
     p = subparsers.add_parser("scorecard", help="aggregate results into scorecard.{json,md}+plots")
     p.add_argument("--bench-id", required=True)
     p.add_argument("--results-root", type=Path, default=Path("results"))
+    p.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="zero wall-clock times and redact the git sha so reruns are byte-identical",
+    )
     p.set_defaults(func=_cmd)

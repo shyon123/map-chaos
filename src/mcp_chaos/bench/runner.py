@@ -103,6 +103,8 @@ def _versions(sandbox_kind: SandboxKind, image_tag: str) -> dict[str, str]:
     for pkg in _PACKAGES:
         with contextlib.suppress(importlib.metadata.PackageNotFoundError):
             v[pkg] = importlib.metadata.version(pkg)
+    if os.environ.get(FAKE_MODELS_ENV):
+        v["models"] = "fake-scripted (synthetic)"
     v["fs_server"] = f"@modelcontextprotocol/server-filesystem@{workers.FS_SERVER_VERSION}"
     v["vcs_server"] = f"mcp-server-git=={workers.VCS_SERVER_VERSION}"
     if sandbox_kind == "docker":

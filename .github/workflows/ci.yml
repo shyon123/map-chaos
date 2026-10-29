@@ -21,6 +21,11 @@ jobs:
       - run: make types
       - run: make cov
       - run: make audit
+      - run: make selftest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selftest-scorecard
+          path: results/selftest-synthetic/scorecard.md
 
   secrets:
     runs-on: ubuntu-latest

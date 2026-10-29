@@ -20,7 +20,7 @@ from typing import Any, Literal
 import anyio
 import httpx
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError
 
@@ -67,6 +67,20 @@ class HarnessError(RuntimeError):
 # -- scripted fake models (tests only) ---------------------------------------------------------
 
 
+ECHO_PLACEHOLDER = "{{last_tool_result}}"
+
+
+def _last_tool_text(messages: list[BaseMessage]) -> str:
+    """Text of the most recent tool message (a naive agent's 'observation'), or ''."""
+    for m in reversed(messages):
+        if isinstance(m, ToolMessage):
+            c = m.content
+            if isinstance(c, str):
+                return c
+            return "".join(str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in c)
+    return ""
+
+
 class _ScriptedModel(BaseChatModel):
     _messages: list[AIMessage] = PrivateAttr(default_factory=list[AIMessage])
     _i: int = PrivateAttr(default=0)
@@ -91,6 +105,13 @@ class _ScriptedModel(BaseChatModel):
     ) -> ChatResult:
         if self._i < len(self._messages):
             msg = self._messages[self._i]
+            if isinstance(msg.content, str) and ECHO_PLACEHOLDER in msg.content:
+                # a deliberately naive agent: pastes its latest tool observation into its answer
+                msg = msg.model_copy(
+                    update={
+                        "content": msg.content.replace(ECHO_PLACEHOLDER, _last_tool_text(messages))
+                    }
+                )
         else:
             msg = AIMessage(content="(script exhausted)")
         self._i += 1
@@ -100,7 +121,8 @@ class _ScriptedModel(BaseChatModel):
 def fake_model_factory(script: dict[str, Any]) -> ModelFactory:
     """Build a model factory from ``{"roles": {role: [{"content": str, "tool_calls": [...]}]}}``.
 
-    Tool-call ids are generated unique per (role, step, index).
+    Tool-call ids are generated unique per (role, step, index). A step's ``content`` may contain
+    ``{{last_tool_result}}``, replaced at call time by the latest tool message text (a naive agent).
     """
     roles: dict[str, Any] = script.get("roles", {})
 

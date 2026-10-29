@@ -111,3 +111,18 @@ async def test_malformed_frame_hangs_sdk_client(
     assert ev.fault.parseable is False
     # the trace describes the emitted (corrupted) bytes, not the original result
     assert ev.result_bytes is not None and ev.result_sha256 is not None
+
+
+@pytest.mark.anyio
+async def test_schema_drift_raises_in_sdk_when_output_schema_declared(
+    fake_script_path: Path, tmp_path: Path
+) -> None:
+    """The SDK client validates structuredContent against a declared outputSchema: drift on such
+    a tool surfaces as an exception, not as a (misleading) result."""
+    trace = tmp_path / "t.jsonl"
+    p = plan(spec(SchemaDriftParams(op="rename", path="rows[].id"), tool="read_rows"))
+    with anyio.fail_after(30):
+        async with via_proxy(fake_script_path, write_plan(tmp_path, p), trace) as c:
+            with pytest.raises(Exception, match=r"(?i)output|schema|valid"):
+                await c.call_tool("read_rows", {})
+    assert any(e.fault is not None for e in events(trace))

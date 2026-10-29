@@ -99,16 +99,16 @@ Per CLAUDE.md. Required properties (hypothesis):
 Integration: proxy ↔ fake server for every fault mode; runner end-to-end with fake models (`GenericFakeChatModel` for LangGraph; gateway replay for the Agent SDK). Coverage ≥85% on `proxy/`, `judge/`, `harden/`, `schemas/`, `llm/`. CI: ruff, pyright, pytest (replay), coverage, pip-audit, gitleaks.
 
 ## 12. Slices and acceptance
-| Slice | Deliverable | Done when |
-|---|---|---|
-| 1 | Scaffold (uv, ruff, pyright, pre-commit, CI) + schemas + proxy relay + fake server + F08 | P1, P2, P4, P5 pass; F08 unit + integration tests; CI green |
-| 2 | Gateway (cache/cassette/budget) + SQLite server + LangGraph target + T1–T6 fixtures + sandbox + clean baseline | Clean baseline ≥5/6 tasks succeed on ≥2 of 3 seeds; cassettes recorded; CI replays at $0 |
-| 3 | F01–F11 + bench runner + manifest | All fault unit tests + P3; 1-seed matrix runs in replay |
-| 4 | Judge + rubric + scorecard + 100-run hand-label set | κ reported; scorecard.md generated |
-| 5 | Agent SDK target | Same tasks pass the clean baseline; per-worker attribution verified |
-| 6 | Red team + random baseline | RQ3 table produced |
-| 7 | Guard + ablations + before/after | RQ4 tables with McNemar |
-| 8 | README | Findings with numbers, 5-command reproduction, limitations, threats to validity |
+| Slice | Deliverable | Done when | Status |
+|---|---|---|---|
+| 1 | Scaffold (uv, ruff, pyright, pre-commit, CI) + schemas + proxy relay + fake server + F08 | P1, P2, P4, P5 pass; F08 unit + integration tests; CI green | done |
+| 2 | Gateway (cache/cassette/budget) + SQLite server + LangGraph target + T1–T6 fixtures + sandbox + clean baseline | Clean baseline ≥5/6 tasks succeed on ≥2 of 3 seeds; cassettes recorded; CI replays at $0 | done (clean-baseline success on a real model pending live run; cassettes not recorded) |
+| 3 | F01–F11 + bench runner + manifest | All fault unit tests + P3; 1-seed matrix runs in replay | done (replay/local with fake models); live matrix pending |
+| 4 | Judge + rubric + scorecard + 100-run hand-label set | κ reported; scorecard.md generated | done (code); 100-run hand-label set and kappa pending live run |
+| 5 | Agent SDK target | Same tasks pass the clean baseline; per-worker attribution verified | done (code, fake gateway); real-model clean baseline pending live run |
+| 6 | Red team + random baseline | RQ3 table produced | done (code); RQ3 table pending live run |
+| 7 | Guard + ablations + before/after | RQ4 tables with McNemar | done (code); RQ4 tables pending live run |
+| 8 | README | Findings with numbers, 5-command reproduction, limitations, threats to validity | partial: README, limitations and $0 findings done; findings with numbers pending live run |
 
 ## 13. Threats to validity (tracked from day 1)
 Small task set (6), a single model family, temperature-0 non-determinism (we use seeds as repeated trials), the LLM judge's subjectivity (mitigated by κ), our own SQLite server, framework prompt non-equivalence (ADR 0005), and canary injections being weaker than real attacks.

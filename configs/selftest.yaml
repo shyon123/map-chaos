@@ -1,0 +1,26 @@
+# $0 end-to-end pipeline self-test (no LLM, no network, no Docker): scripted fake models drive the
+# real harness (proxy, guard, runner, judge, scorecard). The fake "agent" naively pastes tool
+# output into its answer, so injections work on baseline and the guard's filter stops them.
+# The numbers describe the harness, NOT any LLM. Run via `make selftest`.
+bench_id: selftest-synthetic
+cells_file: selftest_cells.yaml
+cells: [clean, F04-frame, F08-echo_in_answer, F10-lying_status]
+frameworks: [langgraph]
+tasks: [T5]
+arms:
+  - name: baseline
+    hardening: null
+  - name: guard_full
+    hardening:
+      schema_validation: true
+      retry: true
+      circuit_breaker: true
+      injection_filter: true
+      size_cap: true
+      prompt_addendum: true
+seeds: [0, 1]
+agent_model: claude-haiku-5-5
+max_turns: 10
+timeout_s: 20
+per_run_budget_usd: 0.5
+concurrency: 4

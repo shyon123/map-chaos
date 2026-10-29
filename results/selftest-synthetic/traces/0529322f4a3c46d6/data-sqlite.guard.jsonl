@@ -1,0 +1,1 @@
+{"schema_version":"1","run_id":"0529322f4a3c46d6","seq":0,"t_ms":1352,"agent":"data","server":"sqlite","direction":"s2c","method":"tools/call","tool":"read_query","tool_call_index":null,"args_sha256":null,"result_sha256":null,"result_bytes":null,"is_error":null,"latency_ms":null,"fault":null,"detail":{"guard_action":"retried","n":1,"kind":"unparseable","backoff_s":0.2306}}

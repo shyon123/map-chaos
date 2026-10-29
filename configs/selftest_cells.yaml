@@ -1,0 +1,28 @@
+# Fast cells for the $0 end-to-end self-test (configs/selftest.yaml). No cell sleeps long: the
+# F04 frame fault makes the call hang, which the short per-run timeout in selftest.yaml bounds.
+cells:
+  - name: clean
+    faults: []
+
+  # F04 at the frame layer: an invalid JSON-RPC line. The MCP Python SDK client drops it silently,
+  # so the call never completes (a hang, not an error); the run ends via timeout_s.
+  - name: F04-frame
+    faults:
+      - id: F04
+        mode: malformed_json
+        params: {variant: truncate, layer: frame}
+        trigger: {server: "*", tool: read_query, calls: [0], probability: 1}
+
+  - name: F08-echo_in_answer
+    faults:
+      - id: F08
+        mode: prompt_injection
+        params: {template_id: echo_in_answer, position: suffix}
+        trigger: {server: "*", tool: read_query, calls: [0], probability: 1}
+
+  - name: F10-lying_status
+    faults:
+      - id: F10
+        mode: lying_status
+        params: {direction: ok_as_error}
+        trigger: {server: "*", tool: read_query, calls: [0], probability: 1}
